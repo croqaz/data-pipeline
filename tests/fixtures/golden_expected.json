@@ -1,0 +1,139 @@
+{
+ "101_chars_one_word": {
+  "drop": "uniq_chars"
+ },
+ "all_caps_headline": {
+  "alpha": 10000,
+  "bytes": 116,
+  "len": 116,
+  "sentences": 3,
+  "uniqChars": 28,
+  "uniqWords": 19,
+  "vowel": 10000,
+  "words": 22
+ },
+ "archaic_long_s": {
+  "alpha": 6977,
+  "bytes": 265,
+  "len": 248,
+  "sentences": 1,
+  "uniqChars": 34,
+  "uniqWords": 37,
+  "vowel": 10000,
+  "words": 43
+ },
+ "cjk_only": {
+  "alpha": 0,
+  "bytes": 453,
+  "len": 153,
+  "sentences": 1,
+  "uniqChars": 14,
+  "uniqWords": 2,
+  "vowel": 0,
+  "words": 4
+ },
+ "degenerate": {
+  "drop": "uniq_chars"
+ },
+ "exactly_100_chars": {
+  "drop": "too_short"
+ },
+ "few_unique_chars": {
+  "drop": "uniq_chars"
+ },
+ "json_escapes": {
+  "alpha": 9412,
+  "bytes": 249,
+  "len": 246,
+  "sentences": 6,
+  "uniqChars": 26,
+  "uniqWords": 12,
+  "vowel": 10000,
+  "words": 51
+ },
+ "ledger": {
+  "alpha": 2273,
+  "bytes": 300,
+  "len": 299,
+  "sentences": 13,
+  "uniqChars": 24,
+  "uniqWords": 15,
+  "vowel": 8667,
+  "words": 66
+ },
+ "long_prose": {
+  "alpha": 10000,
+  "bytes": 57600,
+  "len": 57600,
+  "sentences": 200,
+  "uniqChars": 28,
+  "uniqWords": 20,
+  "vowel": 10000,
+  "words": 12000
+ },
+ "many_unique_chars": {
+  "drop": "uniq_chars"
+ },
+ "mixed_unicode": {
+  "alpha": 8889,
+  "bytes": 243,
+  "len": 215,
+  "sentences": 7,
+  "uniqChars": 61,
+  "uniqWords": 35,
+  "vowel": 9688,
+  "words": 36
+ },
+ "no_sentence_end": {
+  "drop": "uniq_chars"
+ },
+ "numbers_and_symbols": {
+  "alpha": 0,
+  "bytes": 131,
+  "len": 131,
+  "sentences": 1,
+  "uniqChars": 26,
+  "uniqWords": 17,
+  "vowel": 0,
+  "words": 17
+ },
+ "ocr_noise": {
+  "alpha": 9231,
+  "bytes": 225,
+  "len": 225,
+  "sentences": 3,
+  "uniqChars": 44,
+  "uniqWords": 31,
+  "vowel": 10000,
+  "words": 39
+ },
+ "prose": {
+  "alpha": 10000,
+  "bytes": 286,
+  "len": 286,
+  "sentences": 1,
+  "uniqChars": 27,
+  "uniqWords": 20,
+  "vowel": 10000,
+  "words": 60
+ },
+ "raven": {
+  "alpha": 10000,
+  "bytes": 515,
+  "len": 515,
+  "sentences": 5,
+  "uniqChars": 38,
+  "uniqWords": 62,
+  "vowel": 10000,
+  "words": 86
+ },
+ "too_short": {
+  "drop": "too_short"
+ },
+ "two_words": {
+  "drop": "few_words"
+ },
+ "whitespace_only_plus": {
+  "drop": "uniq_chars"
+ }
+}
