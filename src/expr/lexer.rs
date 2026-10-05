@@ -11,9 +11,7 @@ pub enum Token {
     Op(&'static str),
 }
 
-const OPS: &[&str] = &[
-    "&&", "||", "==", "!=", "<=", ">=", "!", "<", ">", "+", "-", "*", "/", "%", "(", ")", "[", "]", ",", ".",
-];
+const OPS: &[&str] = &["&&", "||", "==", "!=", "<=", ">=", "!", "<", ">", "+", "-", "*", "/", "%", "(", ")", "[", "]", ",", "."];
 
 fn err(msg: impl Into<String>) -> Error {
     Error::Expr(msg.into())
@@ -139,45 +137,50 @@ mod tests {
                 Token::Num(0.25),
             ]
         );
-        assert_eq!(ops("a.b(c,[1])"), vec![
-            Token::Ident("a".into()),
-            Token::Op("."),
-            Token::Ident("b".into()),
-            Token::Op("("),
-            Token::Ident("c".into()),
-            Token::Op(","),
-            Token::Op("["),
-            Token::Num(1.0),
-            Token::Op("]"),
-            Token::Op(")"),
-        ]);
-        assert_eq!(ops("!a != b < c <= d > e % f * g / h"), vec![
-            Token::Op("!"),
-            Token::Ident("a".into()),
-            Token::Op("!="),
-            Token::Ident("b".into()),
-            Token::Op("<"),
-            Token::Ident("c".into()),
-            Token::Op("<="),
-            Token::Ident("d".into()),
-            Token::Op(">"),
-            Token::Ident("e".into()),
-            Token::Op("%"),
-            Token::Ident("f".into()),
-            Token::Op("*"),
-            Token::Ident("g".into()),
-            Token::Op("/"),
-            Token::Ident("h".into()),
-        ]);
+        assert_eq!(
+            ops("a.b(c,[1])"),
+            vec![
+                Token::Ident("a".into()),
+                Token::Op("."),
+                Token::Ident("b".into()),
+                Token::Op("("),
+                Token::Ident("c".into()),
+                Token::Op(","),
+                Token::Op("["),
+                Token::Num(1.0),
+                Token::Op("]"),
+                Token::Op(")"),
+            ]
+        );
+        assert_eq!(
+            ops("!a != b < c <= d > e % f * g / h"),
+            vec![
+                Token::Op("!"),
+                Token::Ident("a".into()),
+                Token::Op("!="),
+                Token::Ident("b".into()),
+                Token::Op("<"),
+                Token::Ident("c".into()),
+                Token::Op("<="),
+                Token::Ident("d".into()),
+                Token::Op(">"),
+                Token::Ident("e".into()),
+                Token::Op("%"),
+                Token::Ident("f".into()),
+                Token::Op("*"),
+                Token::Ident("g".into()),
+                Token::Op("/"),
+                Token::Ident("h".into()),
+            ]
+        );
     }
 
     #[test]
     fn strings_with_escapes_and_unicode() {
-        assert_eq!(ops(r#""a\"b" 'c\'d' "tab\there\n\\""#), vec![
-            Token::Str("a\"b".into()),
-            Token::Str("c'd".into()),
-            Token::Str("tab\there\n\\".into()),
-        ]);
+        assert_eq!(
+            ops(r#""a\"b" 'c\'d' "tab\there\n\\""#),
+            vec![Token::Str("a\"b".into()), Token::Str("c'd".into()), Token::Str("tab\there\n\\".into()),]
+        );
         assert_eq!(ops("\"café 日本 😀\""), vec![Token::Str("café 日本 😀".into())]);
     }
 

@@ -6,7 +6,9 @@
 pub mod check;
 pub mod cli;
 pub mod count;
+pub mod delete;
 pub mod error;
+pub mod explore;
 pub mod export;
 pub mod expr;
 pub mod features;
@@ -21,12 +23,14 @@ pub mod store;
 pub mod util;
 
 use std::ffi::OsString;
-use std::io::Write;
+use std::io::{BufRead, Write};
 use std::process::ExitCode;
 
 use clap::Parser;
 
-use cli::{CheckArgs, Cli, Command, CompactArgs, CountArgs, ExportArgs, ImportArgs, InfoArgs, ShowArgs, StatsArgs};
+use cli::{
+    CheckArgs, Cli, Command, CompactArgs, CountArgs, DeleteArgs, ExploreArgs, ExportArgs, ImportArgs, InfoArgs, ShowArgs, StatsArgs,
+};
 use error::{Error, Result};
 
 #[global_allocator]
@@ -42,8 +46,17 @@ where
     ExitCode::from(code)
 }
 
-/// Run the CLI with explicit output streams. Returns the exit code.
+/// Run the CLI with explicit output streams and stdin for prompts.
 pub fn run_with<I, T>(args: I, out: &mut dyn Write, err: &mut dyn Write) -> u8
+where
+    I: IntoIterator<Item = T>,
+    T: Into<OsString> + Clone,
+{
+    run_with_input(args, &mut std::io::stdin().lock(), out, err)
+}
+
+/// Run the CLI with explicit streams; `input` answers confirmation prompts.
+pub fn run_with_input<I, T>(args: I, input: &mut dyn BufRead, out: &mut dyn Write, err: &mut dyn Write) -> u8
 where
     I: IntoIterator<Item = T>,
     T: Into<OsString> + Clone,
@@ -59,7 +72,7 @@ where
             return 0;
         }
     };
-    match run_cli(cli, out, err) {
+    match run_cli(cli, input, out, err) {
         Ok(()) => 0,
         Err(e) => {
             let _ = writeln!(err, "Error: {e}");
@@ -68,7 +81,7 @@ where
     }
 }
 
-pub fn run_cli(cli: Cli, out: &mut dyn Write, err: &mut dyn Write) -> Result<()> {
+pub fn run_cli(cli: Cli, input: &mut dyn BufRead, out: &mut dyn Write, err: &mut dyn Write) -> Result<()> {
     match cli.cmd {
         Command::Import(a) => cmd_import(a, out, err),
         Command::Stats(a) => cmd_stats(a, out),
@@ -78,6 +91,8 @@ pub fn run_cli(cli: Cli, out: &mut dyn Write, err: &mut dyn Write) -> Result<()>
         Command::Info(a) => cmd_info(a, out),
         Command::Show(a) => cmd_show(a, out),
         Command::Compact(a) => cmd_compact(a, out),
+        Command::Delete(a) => cmd_delete(a, input, out, err),
+        Command::Explore(a) => cmd_explore(a, out),
     }
 }
 
@@ -209,5 +224,66 @@ fn cmd_show(a: ShowArgs, out: &mut dyn Write) -> Result<()> {
             write!(out, "{}", show::render(&doc, &sources, a.head))?;
         }
     }
+    Ok(())
+}
+
+fn cmd_delete(a: DeleteArgs, input: &mut dyn BufRead, out: &mut dyn Write, err: &mut dyn Write) -> Result<()> {
+    let opts = delete::DeleteOptions {
+        db: a.store.db,
+        expr: a.expr,
+        ids: a.ids,
+        limit: a.limit,
+        threads: threads(a.threads),
+        backup: a.backup,
+        force: a.force,
+        batch_size: delete::DEFAULT_BATCH,
+    };
+    opts.validate()?;
+    let store = store::open(&opts.db, false)?;
+    let sources = store::Sources::load(store.as_ref())?;
+    let sel = delete::select(store.as_ref(), &sources, &opts)?;
+    if a.dry_run {
+        for key in &sel.keys {
+            writeln!(out, "{}", hash::key_to_hex(key))?;
+        }
+        writeln!(
+            err,
+            "Dry run: {} documents would be deleted ({} scanned); nothing changed",
+            util::fmt_int(sel.keys.len() as u64),
+            util::fmt_int(sel.scanned)
+        )?;
+        return Ok(());
+    }
+    if sel.keys.is_empty() {
+        writeln!(out, "Nothing to delete: 0 documents selected ({} scanned)", util::fmt_int(sel.scanned))?;
+        return Ok(());
+    }
+    if !a.yes {
+        let scope = if sel.scanned > 0 { format!(" ({} scanned)", util::fmt_int(sel.scanned)) } else { String::new() };
+        write!(
+            err,
+            "About to delete {} documents from {}{scope}. Type yes to continue: ",
+            util::fmt_int(sel.keys.len() as u64),
+            opts.db.display()
+        )?;
+        err.flush()?;
+        let mut line = String::new();
+        input.read_line(&mut line)?;
+        if line.trim() != "yes" {
+            return Err(Error::Cancelled(format!("nothing deleted (answer was {:?}, not \"yes\")", line.trim())));
+        }
+    }
+    let report = delete::run(store.as_ref(), &sources, &opts, sel, err)?;
+    write!(out, "{}", report.render())?;
+    Ok(())
+}
+
+fn cmd_explore(a: ExploreArgs, out: &mut dyn Write) -> Result<()> {
+    let opts = explore::ExploreOptions { db: a.store.db, bind: a.bind, port: a.port, threads: threads(a.threads) };
+    let explorer = explore::Explorer::open(&opts)?;
+    let server = explore::bind(explorer, &opts.bind, opts.port)?;
+    write!(out, "{}", explore::banner(&server)?)?;
+    out.flush()?;
+    server.serve(explore::WORKERS);
     Ok(())
 }

@@ -68,6 +68,20 @@ impl FjallStore {
     }
 }
 
+/// Turn fjall guards into the trait's `(key, value)` items. Without
+/// `values`, `key()` is used, which never touches a separated blob.
+fn adapt<'a>(it: impl Iterator<Item = fjall::Guard> + 'a, values: bool) -> KvIter<'a> {
+    Box::new(it.map(move |guard| {
+        if values {
+            let (k, v) = guard.into_inner().map_err(Error::store)?;
+            Ok((to_key(&k)?, v.to_vec()))
+        } else {
+            let k = guard.key().map_err(Error::store)?;
+            Ok((to_key(&k)?, Vec::new()))
+        }
+    }))
+}
+
 fn to_key(bytes: &[u8]) -> Result<Key> {
     bytes.try_into().map_err(|_| Error::Store(format!("key of length {} in meta keyspace", bytes.len())))
 }
@@ -114,17 +128,11 @@ impl Store for FjallStore {
     }
 
     fn iter<'a>(&'a self, ks: Ks, lo: &Key, hi: Option<&Key>, values: bool) -> Result<KvIter<'a>> {
-        let it = Self::range(self.space(ks), lo, hi);
-        Ok(Box::new(it.map(move |guard| {
-            if values {
-                let (k, v) = guard.into_inner().map_err(Error::store)?;
-                Ok((to_key(&k)?, v.to_vec()))
-            } else {
-                // `key()` never touches a separated blob
-                let k = guard.key().map_err(Error::store)?;
-                Ok((to_key(&k)?, Vec::new()))
-            }
-        })))
+        Ok(adapt(Self::range(self.space(ks), lo, hi), values))
+    }
+
+    fn iter_rev<'a>(&'a self, ks: Ks, lo: &Key, hi: Option<&Key>, values: bool) -> Result<KvIter<'a>> {
+        Ok(adapt(Self::range(self.space(ks), lo, hi).rev(), values))
     }
 
     fn put_raw(&self, ks: Ks, key: &Key, value: Option<&[u8]>) -> Result<()> {
@@ -133,6 +141,19 @@ impl Store for FjallStore {
             Some(v) => space.insert(key.as_slice(), v).map_err(Error::store),
             None => space.remove(key.as_slice()).map_err(Error::store),
         }
+    }
+
+    fn delete_batch(&self, keys: &[Key]) -> Result<()> {
+        if keys.is_empty() {
+            return Ok(());
+        }
+        let mut batch = self.db.batch();
+        for key in keys {
+            batch.remove(&self.meta, key.as_slice());
+            batch.remove(&self.text, key.as_slice());
+            batch.remove(&self.extra, key.as_slice());
+        }
+        batch.commit().map_err(Error::store)
     }
 
     fn compact(&self) -> Result<()> {

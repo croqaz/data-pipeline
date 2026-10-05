@@ -163,7 +163,11 @@ impl ImportReport {
                 .filter(|r| f.counts.dropped[r.index()] > 0)
                 .map(|r| format!("{} {}", r.as_str(), fmt_int(f.counts.dropped[r.index()])))
                 .collect();
-            s.push_str(&format!("  Dropped:    {:>12}  ({})\n", fmt_int(f.counts.dropped_total()), if reasons.is_empty() { "none".to_string() } else { reasons.join(", ") }));
+            s.push_str(&format!(
+                "  Dropped:    {:>12}  ({})\n",
+                fmt_int(f.counts.dropped_total()),
+                if reasons.is_empty() { "none".to_string() } else { reasons.join(", ") }
+            ));
             s.push_str(&format!("  Duplicates: {:>12}  (stored copy kept)\n", fmt_int(f.counts.duplicates)));
             s.push_str(&format!("  Replaced:   {:>12}  (new copy scored higher)\n", fmt_int(f.counts.replaced)));
             s.push_str(&format!("  Indexed:    {:>12}\n", fmt_int(f.counts.indexed)));
@@ -387,7 +391,13 @@ impl Writer<'_> {
         let label = doc.source.as_deref().unwrap_or(&self.opts.source);
         let sid = self.sources.intern(label, self.store)?;
         let meta = doc.features.to_meta(sid, doc.extra.is_some());
-        let mut record = Record { key: doc.key, meta: meta.encode(), text: doc.text.into_bytes(), extra: doc.extra.map(String::into_bytes), replace: false };
+        let mut record = Record {
+            key: doc.key,
+            meta: meta.encode(),
+            text: doc.text.into_bytes(),
+            extra: doc.extra.map(String::into_bytes),
+            replace: false,
+        };
         let k8 = u64::from_le_bytes(record.key[..8].try_into().expect("8 bytes"));
         let counts = &mut self.counts[file];
         if self.seen.insert(k8) {
@@ -643,10 +653,17 @@ mod tests {
     use super::*;
 
     fn cfg() -> WorkerCfg {
-        WorkerCfg { text_key: "text".into(), source_key: "source".into(), extra: vec!["year".into(), "title".into()], max_len: 10_000, keep_raw: true }
+        WorkerCfg {
+            text_key: "text".into(),
+            source_key: "source".into(),
+            extra: vec!["year".into(), "title".into()],
+            max_len: 10_000,
+            keep_raw: true,
+        }
     }
 
-    const GOOD: &str = "The quick brown fox jumps over the lazy dog. Pack my box with five dozen liquor jugs! How vexingly quick daft zebras jump.";
+    const GOOD: &str =
+        "The quick brown fox jumps over the lazy dog. Pack my box with five dozen liquor jugs! How vexingly quick daft zebras jump.";
 
     #[test]
     fn parse_line_paths() {
@@ -661,7 +678,9 @@ mod tests {
         assert_eq!(process_line(b"{\"text\": 5}", &c, &mut sc).err(), Some(DropReason::NoText));
         assert_eq!(process_line(b"{\"text\": \"\"}", &c, &mut sc).err(), Some(DropReason::NoText));
         assert_eq!(process_line(b"{\"text\": \"short\"}", &c, &mut sc).err(), Some(DropReason::TooShort));
-        let line = format!("{{\"text\": \"{GOOD}\", \"source\": \"gut\", \"year\": 1842, \"title\": \"A \\\"B\\\"\", \"skip\": true, \"year\": 1843}}");
+        let line = format!(
+            "{{\"text\": \"{GOOD}\", \"source\": \"gut\", \"year\": 1842, \"title\": \"A \\\"B\\\"\", \"skip\": true, \"year\": 1843}}"
+        );
         let doc = process_line(line.as_bytes(), &c, &mut sc).unwrap().unwrap();
         assert_eq!(doc.text, GOOD);
         assert_eq!(doc.source.as_deref(), Some("gut"));
@@ -790,7 +809,13 @@ mod tests {
 
     #[test]
     fn report_renders_every_section() {
-        let mut rep = ImportReport { elapsed: Duration::from_secs(2), bytes: 4_000_000, stopped_at_limit: true, has_store: true, ..Default::default() };
+        let mut rep = ImportReport {
+            elapsed: Duration::from_secs(2),
+            bytes: 4_000_000,
+            stopped_at_limit: true,
+            has_store: true,
+            ..Default::default()
+        };
         let mut counts = Counts { lines: 5, skipped: 1, empty: 1, indexed: 2, ..Default::default() };
         counts.dropped[DropReason::BadJson.index()] = 1;
         rep.totals.add(&counts);

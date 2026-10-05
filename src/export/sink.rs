@@ -49,7 +49,11 @@ impl Naming {
     /// Final path of file number `n` (1-based; ignored without sharding).
     pub fn path(&self, n: u64) -> PathBuf {
         let s = self.stem.to_string_lossy();
-        if self.shard.is_some() { PathBuf::from(format!("{s}-{n:04}{}", self.suffix())) } else { PathBuf::from(format!("{s}{}", self.suffix())) }
+        if self.shard.is_some() {
+            PathBuf::from(format!("{s}-{n:04}{}", self.suffix()))
+        } else {
+            PathBuf::from(format!("{s}{}", self.suffix()))
+        }
     }
 
     /// How many files `docs` documents produce.
@@ -100,11 +104,29 @@ pub struct Sink<'a> {
 
 impl<'a> Sink<'a> {
     pub fn files(naming: Naming, zstd_level: i32, zstd_threads: usize) -> Sink<'a> {
-        Sink { naming: Some(naming), stdout: None, stdout_bytes: 0, stdout_docs: 0, zstd_level, zstd_threads: zstd_threads.clamp(1, 64) as u32, current: None, files: Vec::new() }
+        Sink {
+            naming: Some(naming),
+            stdout: None,
+            stdout_bytes: 0,
+            stdout_docs: 0,
+            zstd_level,
+            zstd_threads: zstd_threads.clamp(1, 64) as u32,
+            current: None,
+            files: Vec::new(),
+        }
     }
 
     pub fn stdout(w: &'a mut dyn Write) -> Sink<'a> {
-        Sink { naming: None, stdout: Some(w), stdout_bytes: 0, stdout_docs: 0, zstd_level: 0, zstd_threads: 1, current: None, files: Vec::new() }
+        Sink {
+            naming: None,
+            stdout: Some(w),
+            stdout_bytes: 0,
+            stdout_docs: 0,
+            zstd_level: 0,
+            zstd_threads: 1,
+            current: None,
+            files: Vec::new(),
+        }
     }
 
     fn open(&mut self, n: u64) -> Result<()> {

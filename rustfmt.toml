@@ -1,0 +1,6 @@
+# One style for the whole crate. 140 columns and "Max" heuristics keep the
+# dense one-line asserts and struct literals this code is written in; the
+# default 100 columns turned tests/cli.rs from 800 lines into 1,400.
+style_edition = "2024"
+max_width = 140
+use_small_heuristics = "Max"

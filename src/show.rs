@@ -108,7 +108,13 @@ mod tests {
         let store = store::open(&dir.path().join("db"), true).unwrap();
         let recs: Vec<Record> = keys
             .iter()
-            .map(|k| Record { key: *k, meta: Meta { words: 3, ..Default::default() }.encode(), text: b"Hello.\n".to_vec(), extra: None, replace: false })
+            .map(|k| Record {
+                key: *k,
+                meta: Meta { words: 3, ..Default::default() }.encode(),
+                text: b"Hello.\n".to_vec(),
+                extra: None,
+                replace: false,
+            })
             .collect();
         store.put_batch(&recs).unwrap();
         (dir, store)

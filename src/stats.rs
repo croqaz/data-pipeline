@@ -37,6 +37,19 @@ pub fn range_for(t: usize, n: usize) -> Option<(Key, Option<Key>)> {
     Some((lo_key, hi_key))
 }
 
+/// Does `filter` accept this record? `text` and `extra` are read only when
+/// the expression refers to them.
+pub fn matches(store: &dyn Store, sources: &Sources, filter: &Compiled, key: &Key, meta: &Meta) -> Result<bool> {
+    let text = if filter.needs_text { store.get_text(key)? } else { None };
+    let text_str = match &text {
+        Some(t) => Some(std::str::from_utf8(t).map_err(|_| Error::Store("stored text is not UTF-8".into()))?),
+        None => None,
+    };
+    let extra = if filter.needs_extra { store.get_extra(key)? } else { None };
+    let row = RecordRow { meta, key, source: sources.name(meta.source), text: text_str, extra: extra.as_deref() };
+    Ok(filter.matches(&row))
+}
+
 fn scan_range<A>(
     store: &dyn Store,
     sources: &Sources,
@@ -53,16 +66,7 @@ fn scan_range<A>(
         let meta = Meta::decode(bytes)?;
         let keep = match cfg.filter {
             None => true,
-            Some(f) => {
-                let text = if f.needs_text { store.get_text(key)? } else { None };
-                let text_str = match &text {
-                    Some(t) => Some(std::str::from_utf8(t).map_err(|_| Error::Store("stored text is not UTF-8".into()))?),
-                    None => None,
-                };
-                let extra = if f.needs_extra { store.get_extra(key)? } else { None };
-                let row = RecordRow { meta: &meta, key, source: sources.name(meta.source), text: text_str, extra: extra.as_deref() };
-                f.matches(&row)
-            }
+            Some(f) => matches(store, sources, f, key, &meta)?,
         };
         if keep {
             matched += 1;
@@ -238,9 +242,14 @@ pub fn render(rep: &StatsReport, sources: &Sources, expr: Option<&str>) -> Strin
             ]
         })
         .collect();
-    let widths: Vec<usize> = (0..headers.len()).map(|i| rows.iter().map(|r| r[i].len()).chain(std::iter::once(headers[i].len())).max().unwrap_or(0)).collect();
+    let widths: Vec<usize> =
+        (0..headers.len()).map(|i| rows.iter().map(|r| r[i].len()).chain(std::iter::once(headers[i].len())).max().unwrap_or(0)).collect();
     let fmt_row = |cells: &[String]| {
-        let parts: Vec<String> = cells.iter().enumerate().map(|(i, c)| if i == 0 { format!("{:<w$}", c, w = widths[i]) } else { format!("{:>w$}", c, w = widths[i]) }).collect();
+        let parts: Vec<String> = cells
+            .iter()
+            .enumerate()
+            .map(|(i, c)| if i == 0 { format!("{:<w$}", c, w = widths[i]) } else { format!("{:>w$}", c, w = widths[i]) })
+            .collect();
         format!("| {} |\n", parts.join(" | "))
     };
     s.push_str(&fmt_row(&headers.iter().map(|h| h.to_string()).collect::<Vec<_>>()));

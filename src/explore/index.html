@@ -1,0 +1,273 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>pipeline explore</title>
+<style>
+  :root { color-scheme: dark; --bg:#0f1115; --panel:#171a21; --fg:#e6e6e6; --muted:#8b93a1; --accent:#5aa9e6; --border:#262b36; --warn:#e8d58a; --err:#ffb0a6; --ok:#7fd6a2; }
+  * { box-sizing: border-box; }
+  body { margin:0; font:14px/1.5 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; background:var(--bg); color:var(--fg); }
+  header { padding:8px 16px; background:var(--panel); border-bottom:1px solid var(--border); position:sticky; top:0; z-index:5; display:flex; gap:16px; flex-wrap:wrap; align-items:baseline; }
+  header b { color:var(--accent); }
+  main { max-width:1100px; margin:0 auto; padding:12px 16px; }
+  .panel { background:var(--panel); border:1px solid var(--border); border-radius:8px; padding:8px 12px; margin:10px 0; }
+  .row { display:flex; gap:6px; align-items:center; flex-wrap:wrap; margin:4px 0; }
+  button { font:inherit; background:var(--bg); color:var(--fg); border:1px solid var(--border); border-radius:6px; padding:5px 10px; cursor:pointer; }
+  button:hover { border-color:var(--accent); }
+  button.primary { background:var(--accent); color:#04121f; border-color:var(--accent); font-weight:bold; }
+  button:disabled { opacity:.4; cursor:not-allowed; }
+  input[type=text] { font:inherit; background:var(--bg); color:var(--fg); border:1px solid var(--border); border-radius:6px; padding:5px 8px; }
+  input[type=text]:focus { outline:none; border-color:var(--accent); }
+  #expr { flex:1 1 420px; }
+  #jump { flex:1 1 300px; }
+  .muted { color:var(--muted); }
+  .msg { display:none; padding:6px 10px; border-radius:6px; margin:8px 0; }
+  .msg.show { display:block; }
+  .msg.err { background:#301818; color:var(--err); }
+  .msg.warn { background:#302a12; color:var(--warn); }
+  .msg.ok { background:#123021; color:var(--ok); }
+  .idline code { color:var(--accent); word-break:break-all; }
+  .grid { display:grid; grid-template-columns:repeat(auto-fill, minmax(170px, 1fr)); gap:1px; background:var(--border); border:1px solid var(--border); margin:8px 0; }
+  .cell { display:flex; justify-content:space-between; gap:8px; padding:3px 8px; background:var(--panel); }
+  .cell .k { color:var(--muted); }
+  .cell .v { font-variant-numeric:tabular-nums; }
+  pre { margin:6px 0; white-space:pre-wrap; word-break:break-word; }
+  pre.extra { color:var(--warn); background:var(--bg); padding:6px 8px; border-radius:6px; border:1px solid var(--border); }
+  pre.text { background:var(--bg); padding:10px; border-radius:6px; border:1px solid var(--border); max-height:72vh; overflow:auto; }
+  table { width:100%; border-collapse:collapse; margin-top:6px; }
+  th, td { text-align:left; padding:3px 8px; border-top:1px solid var(--border); vertical-align:top; }
+  th { color:var(--muted); font-weight:normal; }
+  tbody tr { cursor:pointer; }
+  tbody tr:hover { background:var(--bg); }
+  td.id { color:var(--accent); white-space:nowrap; }
+  td.num { text-align:right; font-variant-numeric:tabular-nums; white-space:nowrap; }
+  td.head { color:var(--muted); }
+  [hidden] { display:none !important; }
+</style>
+</head>
+<body>
+<header>
+  <b>pipeline explore</b>
+  <span id="info" class="muted">loading…</span>
+</header>
+<main>
+  <section class="panel">
+    <div class="row">
+      <input id="expr" type="text" placeholder='expression, e.g. words > 500 && source == "gutenberg"   (Enter = random match)' spellcheck="false" autocomplete="off">
+      <button id="btnRandom" class="primary" title="r">Random</button>
+      <button id="btnPrevMatch" title="previous match in key order">◀ match</button>
+      <button id="btnNextMatch" title="next match in key order">match ▶</button>
+      <button id="btnList" title="list matches in key order">List</button>
+      <button id="btnCount" title="count every match (full scan)">Count</button>
+      <span id="exprStatus" class="muted"></span>
+    </div>
+    <div class="row">
+      <button data-nav="first">⏮ First</button>
+      <button data-nav="prev10">◀◀ 10</button>
+      <button data-nav="prev" title="←">◀ Prev</button>
+      <button data-nav="next" title="→">Next ▶</button>
+      <button data-nav="next10">10 ▶▶</button>
+      <button data-nav="last">Last ⏭</button>
+      <input id="jump" type="text" placeholder="id or prefix, Enter to jump" spellcheck="false" autocomplete="off">
+      <span class="muted">keys: ← → prev/next, r random</span>
+    </div>
+  </section>
+
+  <div id="msg" class="msg"></div>
+
+  <section id="results" class="panel" hidden>
+    <div class="row">
+      <b id="resultsTitle"></b>
+      <button id="btnMore">More</button>
+      <button id="btnCloseResults">Close</button>
+    </div>
+    <table>
+      <thead><tr><th>id</th><th>source</th><th>words</th><th>len</th><th>text</th></tr></thead>
+      <tbody id="resultsBody"></tbody>
+    </table>
+  </section>
+
+  <section id="doc" class="panel" hidden>
+    <div class="idline">id <code id="docId"></code> <span id="docPos" class="muted"></span></div>
+    <div>source <b id="docSource"></b></div>
+    <div class="grid" id="docFeatures"></div>
+    <pre id="docExtra" class="extra" hidden></pre>
+    <div class="row"><b>text</b> <span id="docChars" class="muted"></span> <button id="btnFull" hidden></button></div>
+    <pre id="docText" class="text"></pre>
+  </section>
+  <div id="empty" class="muted">Loading…</div>
+</main>
+
+<script>
+const $ = s => document.querySelector(s);
+const fmt = n => Number(n).toLocaleString('en-US');
+const mb = b => (b / 1e6).toFixed(1) + ' MB';
+const TEXT_CAP = 200000;      // characters rendered before "show all"
+const TRIES = 10000;          // documents a filtered random draw examines
+
+let features = [];            // [{name, decimals}] from /api/info
+let current = null;           // the document on screen
+let cursor = null;            // where "match" continues from after a scan ran out
+let listing = null;           // {last, done} of the results table
+
+async function api(path) {
+  const r = await fetch(path);
+  let data = null;
+  try { data = await r.json(); } catch (e) { throw new Error('bad reply from ' + path); }
+  if (!r.ok) throw new Error(data && data.error ? data.error : r.status + ' ' + r.statusText);
+  return data;
+}
+function msg(kind, text) { const m = $('#msg'); m.className = 'msg show ' + kind; m.textContent = text; }
+function clearMsg() { $('#msg').className = 'msg'; }
+function expr() { return $('#expr').value.trim(); }
+function qs(params) {
+  return Object.entries(params).filter(([, v]) => v !== undefined && v !== null && v !== '')
+    .map(([k, v]) => k + '=' + encodeURIComponent(v)).join('&');
+}
+function rememberExpr() { localStorage.setItem('explore.expr', expr()); }
+function cell(k, v) {
+  const c = document.createElement('div'); c.className = 'cell';
+  const ks = document.createElement('span'); ks.className = 'k'; ks.textContent = k;
+  const vs = document.createElement('span'); vs.className = 'v'; vs.textContent = v;
+  c.append(ks, vs); return c;
+}
+function present(f, v) {
+  if (v === null || v === undefined) return '—';
+  return f.decimals ? Number(v).toFixed(f.decimals) : fmt(v);
+}
+
+async function loadInfo() {
+  try {
+    const info = await api('/api/info');
+    features = info.features;
+    $('#info').textContent = info.dir + ' · about ' + fmt(info.approx_docs) + ' documents · ' + mb(info.disk)
+      + ' · sources: ' + (info.sources.join(', ') || 'none');
+  } catch (e) { $('#info').textContent = 'info failed: ' + e.message; }
+}
+
+function showDoc(doc, pos) {
+  current = doc; cursor = doc.id;
+  clearMsg();
+  $('#empty').hidden = true; $('#doc').hidden = false;
+  $('#docId').textContent = doc.id;
+  $('#docPos').textContent = pos || '';
+  $('#docSource').textContent = doc.source;
+  const grid = $('#docFeatures'); grid.replaceChildren();
+  for (const f of features) grid.append(cell(f.name, present(f, doc.features[f.name])));
+  const extra = $('#docExtra');
+  if (doc.extra && typeof doc.extra === 'object') {
+    extra.hidden = false;
+    extra.textContent = Object.entries(doc.extra).map(([k, v]) => k + ' = ' + JSON.stringify(v)).join('\n');
+  } else { extra.hidden = true; }
+  $('#docChars').textContent = fmt(doc.chars) + ' chars';
+  renderText(doc.text, false);
+  if (location.hash !== '#/id/' + doc.id) location.hash = '#/id/' + doc.id;
+}
+function renderText(text, full) {
+  const pre = $('#docText'), btn = $('#btnFull');
+  if (!full && text.length > TEXT_CAP) {
+    pre.textContent = text.slice(0, TEXT_CAP) + '\n…';
+    btn.hidden = false; btn.textContent = 'show all ' + fmt(text.length) + ' characters';
+  } else { pre.textContent = text; btn.hidden = true; }
+}
+
+async function go(path, pos) {
+  try { showDoc(await api(path), pos); } catch (e) { msg('err', e.message); }
+}
+function nav(dir) {
+  const id = current ? current.id : null;
+  const step = (way, n) => go('/api/' + way + (id ? '/' + id : '') + '?n=' + n, n > 1 ? n + ' ' + way : '');
+  switch (dir) {
+    case 'first': return go('/api/next?n=1', 'first');
+    case 'last': return go('/api/prev?n=1', 'last');
+    case 'next': return step('next', 1);
+    case 'prev': return step('prev', 1);
+    case 'next10': return step('next', 10);
+    case 'prev10': return step('prev', 10);
+  }
+}
+async function random() {
+  const e = expr(); rememberExpr();
+  try {
+    const d = await api('/api/random?' + qs({ expr: e, tries: TRIES }));
+    showDoc(d, e ? 'random match, ' + fmt(d.looked_at) + ' looked at in ' + d.secs + ' s' : 'random');
+  } catch (err) { msg('err', err.message); }
+}
+async function match(dir) {
+  const e = expr(); rememberExpr();
+  if (!e) return nav(dir);
+  if (!current) return random();
+  try {
+    const d = await api('/api/query?' + qs({ expr: e, from: cursor, dir, limit: 1, head: 0 }));
+    if (d.rows.length) return go('/api/doc/' + d.rows[0].id, (dir === 'next' ? 'next' : 'previous') + ' match, ' + fmt(d.scanned) + ' scanned');
+    if (d.done) { msg('warn', 'no ' + (dir === 'next' ? 'later' : 'earlier') + ' match'); cursor = current.id; }
+    else { cursor = d.last; msg('warn', 'no match in ' + fmt(d.scanned) + ' documents; press again to keep scanning'); }
+  } catch (err) { msg('err', err.message); }
+}
+async function list(more) {
+  const e = expr(); rememberExpr();
+  const from = more && listing ? listing.last : '';
+  if (more && listing && listing.done) return;
+  $('#resultsTitle').textContent = 'scanning…'; $('#results').hidden = false;
+  try {
+    const d = await api('/api/query?' + qs({ expr: e, from, dir: 'next', limit: 50, head: 160 }));
+    listing = { last: d.last, done: d.done };
+    const body = $('#resultsBody');
+    if (!more) body.replaceChildren();
+    for (const r of d.rows) {
+      const tr = document.createElement('tr');
+      const td = (cls, text) => { const c = document.createElement('td'); c.className = cls; c.textContent = text; tr.append(c); };
+      td('id', r.id.slice(0, 12)); td('', r.source); td('num', fmt(r.features.words)); td('num', fmt(r.features.len)); td('head', r.head || '');
+      tr.onclick = () => go('/api/doc/' + r.id, 'from the list');
+      body.append(tr);
+    }
+    const total = body.children.length;
+    $('#resultsTitle').textContent = fmt(total) + ' listed' + (d.done ? ', end of store' : '') + ' · last request: ' + fmt(d.matched)
+      + ' of ' + fmt(d.scanned) + ' scanned in ' + d.secs + ' s';
+    $('#btnMore').disabled = d.done;
+  } catch (err) { $('#resultsTitle').textContent = ''; msg('err', err.message); }
+}
+async function count() {
+  const e = expr(); rememberExpr();
+  const st = $('#exprStatus'); st.textContent = 'counting (full scan)…';
+  try {
+    const d = await api('/api/count?' + qs({ expr: e }));
+    st.textContent = fmt(d.matched) + ' / ' + fmt(d.scanned) + ' match (' + d.pct.toFixed(3) + '%) in ' + d.secs + ' s';
+  } catch (err) { st.textContent = ''; msg('err', err.message); }
+}
+function jump() {
+  const id = $('#jump').value.trim();
+  if (id) go('/api/doc/' + encodeURIComponent(id));
+}
+
+document.querySelectorAll('button[data-nav]').forEach(b => b.onclick = () => nav(b.dataset.nav));
+$('#btnRandom').onclick = random;
+$('#btnPrevMatch').onclick = () => match('prev');
+$('#btnNextMatch').onclick = () => match('next');
+$('#btnList').onclick = () => list(false);
+$('#btnMore').onclick = () => list(true);
+$('#btnCloseResults').onclick = () => { $('#results').hidden = true; };
+$('#btnCount').onclick = count;
+$('#btnFull').onclick = () => renderText(current.text, true);
+$('#jump').addEventListener('keydown', ev => { if (ev.key === 'Enter') jump(); });
+$('#expr').addEventListener('keydown', ev => { if (ev.key === 'Enter') random(); });
+document.addEventListener('keydown', ev => {
+  if (ev.target.matches('input, textarea') || ev.ctrlKey || ev.metaKey || ev.altKey) return;
+  if (ev.key === 'ArrowLeft') nav('prev');
+  else if (ev.key === 'ArrowRight') nav('next');
+  else if (ev.key === 'r') random();
+});
+window.addEventListener('hashchange', () => {
+  const m = location.hash.match(/^#\/id\/([0-9a-fA-F]+)$/);
+  if (m && (!current || current.id !== m[1])) go('/api/doc/' + m[1]);
+});
+
+$('#expr').value = localStorage.getItem('explore.expr') || '';
+loadInfo().then(() => {
+  const m = location.hash.match(/^#\/id\/([0-9a-fA-F]+)$/);
+  if (m) go('/api/doc/' + m[1]); else random();
+});
+</script>
+</body>
+</html>

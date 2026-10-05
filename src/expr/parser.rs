@@ -318,7 +318,10 @@ mod tests {
             parse("8 / 2 % 3").unwrap(),
             Ast::Bin(BinOp::Mod, b(Ast::Bin(BinOp::Div, b(Ast::Num(8.0)), b(Ast::Num(2.0)))), b(Ast::Num(3.0)))
         );
-        assert_eq!(parse("(1 + 2) * 3").unwrap(), Ast::Bin(BinOp::Mul, b(Ast::Bin(BinOp::Add, b(Ast::Num(1.0)), b(Ast::Num(2.0)))), b(Ast::Num(3.0))));
+        assert_eq!(
+            parse("(1 + 2) * 3").unwrap(),
+            Ast::Bin(BinOp::Mul, b(Ast::Bin(BinOp::Add, b(Ast::Num(1.0)), b(Ast::Num(2.0)))), b(Ast::Num(3.0)))
+        );
     }
 
     #[test]
@@ -338,7 +341,10 @@ mod tests {
         );
         assert_eq!(parse("text.lower()").unwrap(), Ast::Method(b(id("text")), "lower".into(), vec![]));
         assert_eq!(parse("[]").unwrap(), Ast::List(vec![]));
-        assert_eq!(parse("true && false || null").unwrap(), Ast::Bin(BinOp::Or, b(Ast::Bin(BinOp::And, b(Ast::Bool(true)), b(Ast::Bool(false)))), b(Ast::Null)));
+        assert_eq!(
+            parse("true && false || null").unwrap(),
+            Ast::Bin(BinOp::Or, b(Ast::Bin(BinOp::And, b(Ast::Bool(true)), b(Ast::Bool(false)))), b(Ast::Null))
+        );
         assert_eq!(parse("!!a").unwrap(), Ast::Not(b(Ast::Not(b(id("a"))))));
         assert_eq!(parse("--1").unwrap(), Ast::Neg(b(Ast::Neg(b(Ast::Num(1.0))))));
     }

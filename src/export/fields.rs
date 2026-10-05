@@ -270,7 +270,22 @@ mod tests {
     }
 
     fn meta() -> Meta {
-        Meta { schema: 1, source: 0, len: 5, bytes: 5, words: 1, uniq_words: 1, sentences: 1, uniq_chars: 4, vowel: 10_000, alpha: 5000, flags: 1, dict_hit: None, entropy: Some(412), compress: Some(6150) }
+        Meta {
+            schema: 1,
+            source: 0,
+            len: 5,
+            bytes: 5,
+            words: 1,
+            uniq_words: 1,
+            sentences: 1,
+            uniq_chars: 4,
+            vowel: 10_000,
+            alpha: 5000,
+            flags: 1,
+            dict_hit: None,
+            entropy: Some(412),
+            compress: Some(6150),
+        }
     }
 
     fn emit(fields: &Fields, header: Option<&Template>, text: Option<&str>, extra: Option<&str>) -> String {
@@ -297,7 +312,13 @@ mod tests {
         assert_eq!(v["words"], 1, "the feature wins over the metadata key");
         // order: id, source, features, text, then the flattened metadata
         let pos = |k: &str| line.find(&format!("\"{k}\":")).unwrap();
-        assert!(pos("id") < pos("source") && pos("source") < pos("len") && pos("alpha") < pos("text") && pos("text") < pos("year") && pos("year") < pos("title"));
+        assert!(
+            pos("id") < pos("source")
+                && pos("source") < pos("len")
+                && pos("alpha") < pos("text")
+                && pos("text") < pos("year")
+                && pos("year") < pos("title")
+        );
         assert!(line.starts_with("{\"id\":") && line.ends_with("}\n"));
     }
 

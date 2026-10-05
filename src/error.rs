@@ -17,6 +17,9 @@ pub enum Error {
     Cbor(String),
     #[error("import aborted: {0}")]
     Aborted(String),
+    /// The user declined a confirmation prompt; nothing was changed.
+    #[error("cancelled: {0}")]
+    Cancelled(String),
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -49,6 +52,13 @@ impl Error {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cancelled_is_exit_one() {
+        let e = Error::Cancelled("nothing deleted".into());
+        assert_eq!(e.exit_code(), 1);
+        assert_eq!(e.to_string(), "cancelled: nothing deleted");
+    }
 
     #[test]
     fn exit_codes_and_messages() {

@@ -31,7 +31,8 @@ struct Expected {
 fn golden() {
     let dir = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures");
     let cases = std::fs::read_to_string(format!("{dir}/golden.jsonl")).unwrap();
-    let expected: BTreeMap<String, Expected> = serde_json::from_str(&std::fs::read_to_string(format!("{dir}/golden_expected.json")).unwrap()).unwrap();
+    let expected: BTreeMap<String, Expected> =
+        serde_json::from_str(&std::fs::read_to_string(format!("{dir}/golden_expected.json")).unwrap()).unwrap();
     let mut scratch = Scratch::default();
     let mut checked = 0;
     for line in cases.lines() {

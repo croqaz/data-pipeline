@@ -49,14 +49,7 @@ impl<R: Read> Chunker<R> {
     /// single line is longer than that.
     pub fn new(reader: R, target: usize) -> Self {
         let target = target.max(1);
-        Self {
-            reader,
-            buf: Vec::with_capacity(target + (1 << 20)),
-            tmp: vec![0u8; 1 << 20],
-            target,
-            next_line: 1,
-            eof: false,
-        }
+        Self { reader, buf: Vec::with_capacity(target + (1 << 20)), tmp: vec![0u8; 1 << 20], target, next_line: 1, eof: false }
     }
 
     fn fill(&mut self) -> Result<()> {

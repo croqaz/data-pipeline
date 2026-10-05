@@ -73,10 +73,15 @@ pub trait Store: Send + Sync {
     /// Iterate one keyspace over `[lo, hi)`. With `values == false` every
     /// value is empty and the engine skips reading it where it can.
     fn iter<'a>(&'a self, ks: Keyspace, lo: &Key, hi: Option<&Key>, values: bool) -> Result<KvIter<'a>>;
+    /// [`Store::iter`] walked backwards: the same `[lo, hi)`, highest key first.
+    fn iter_rev<'a>(&'a self, ks: Keyspace, lo: &Key, hi: Option<&Key>, values: bool) -> Result<KvIter<'a>>;
     /// Write (`Some`) or delete (`None`) one value in one keyspace. The
     /// low-level primitive behind delete and recompute; `put_batch` is the
     /// consistent way to add a document.
     fn put_raw(&self, ks: Keyspace, key: &Key, value: Option<&[u8]>) -> Result<()>;
+    /// Remove documents from every keyspace, atomically per call. Keys
+    /// that do not exist are ignored.
+    fn delete_batch(&self, keys: &[Key]) -> Result<()>;
     /// Rewrite every keyspace into its most compact form and wait for it.
     fn compact(&self) -> Result<()>;
     /// Engine facts for `info`, as (label, value) pairs.
@@ -155,7 +160,9 @@ pub fn check_dir(dir: &Path, create: bool) -> Result<()> {
     let path = dir.join(MARKER_FILE);
     match std::fs::read_to_string(&path) {
         Ok(s) if s.trim() == ENGINE => Ok(()),
-        Ok(s) => Err(Error::Store(format!("{} names an unknown engine {:?}; this build only reads {ENGINE} stores", path.display(), s.trim()))),
+        Ok(s) => {
+            Err(Error::Store(format!("{} names an unknown engine {:?}; this build only reads {ENGINE} stores", path.display(), s.trim())))
+        }
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
             let empty = !dir.is_dir() || std::fs::read_dir(dir)?.next().is_none();
             if !empty {
@@ -189,14 +196,19 @@ pub fn marker_path(dir: &Path) -> PathBuf {
     dir.join(MARKER_FILE)
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
     pub(crate) fn rec(byte: u8, words: u32, extra: Option<&str>) -> Record {
         let meta = crate::meta::Meta { words, ..Default::default() }.encode();
-        Record { key: [byte; 16], meta, text: format!("text {byte}").into_bytes(), extra: extra.map(|s| s.as_bytes().to_vec()), replace: false }
+        Record {
+            key: [byte; 16],
+            meta,
+            text: format!("text {byte}").into_bytes(),
+            extra: extra.map(|s| s.as_bytes().to_vec()),
+            replace: false,
+        }
     }
 
     /// The behavioural contract the store must satisfy.
@@ -214,24 +226,30 @@ mod tests {
 
         // full scan in key order
         let mut seen = Vec::new();
-        store.scan_meta(&[0; 16], None, &mut |k, v| {
-            seen.push((k[0], crate::meta::Meta::decode(v).unwrap().words));
-            Ok(true)
-        }).unwrap();
+        store
+            .scan_meta(&[0; 16], None, &mut |k, v| {
+                seen.push((k[0], crate::meta::Meta::decode(v).unwrap().words));
+                Ok(true)
+            })
+            .unwrap();
         assert_eq!(seen, vec![(1, 10), (2, 20), (3, 30)]);
         // bounded scan [2, 3)
         let mut seen = Vec::new();
-        store.scan_meta(&[2; 16], Some(&[3; 16]), &mut |k, _| {
-            seen.push(k[0]);
-            Ok(true)
-        }).unwrap();
+        store
+            .scan_meta(&[2; 16], Some(&[3; 16]), &mut |k, _| {
+                seen.push(k[0]);
+                Ok(true)
+            })
+            .unwrap();
         assert_eq!(seen, vec![2]);
         // early stop
         let mut n = 0;
-        store.scan_meta(&[0; 16], None, &mut |_, _| {
-            n += 1;
-            Ok(false)
-        }).unwrap();
+        store
+            .scan_meta(&[0; 16], None, &mut |_, _| {
+                n += 1;
+                Ok(false)
+            })
+            .unwrap();
         assert_eq!(n, 1);
         // callback errors propagate
         assert!(store.scan_meta(&[0; 16], None, &mut |_, _| Err(Error::Store("stop".into()))).is_err());
@@ -266,9 +284,21 @@ mod tests {
         };
         assert_eq!(keys(Keyspace::Text, 0, None, true), vec![(1, b"text 1".to_vec()), (2, b"text 2".to_vec()), (3, b"text 3".to_vec())]);
         assert_eq!(keys(Keyspace::Text, 0, None, false), vec![(1, vec![]), (2, vec![]), (3, vec![])]);
-        assert_eq!(keys(Keyspace::Extra, 0, None, true), vec![(3, b"{\"a\":1}".to_vec())], "key 2's extra was removed by the replace above");
+        assert_eq!(
+            keys(Keyspace::Extra, 0, None, true),
+            vec![(3, b"{\"a\":1}".to_vec())],
+            "key 2's extra was removed by the replace above"
+        );
         assert_eq!(keys(Keyspace::Meta, 2, Some(3), false), vec![(2, vec![])]);
         assert_eq!(keys(Keyspace::Meta, 4, None, false), vec![]);
+        let rkeys = |ks: Keyspace, lo: u8, hi: Option<u8>, values: bool| -> Vec<(u8, Vec<u8>)> {
+            let hi = hi.map(|h| [h; 16]);
+            store.iter_rev(ks, &[lo; 16], hi.as_ref(), values).unwrap().map(|r| r.unwrap()).map(|(k, v)| (k[0], v)).collect()
+        };
+        assert_eq!(rkeys(Keyspace::Text, 0, None, true), vec![(3, b"text 3".to_vec()), (2, b"text 2".to_vec()), (1, b"text 1".to_vec())]);
+        assert_eq!(rkeys(Keyspace::Meta, 0, Some(3), false), vec![(2, vec![]), (1, vec![])], "hi stays exclusive going backwards");
+        assert_eq!(rkeys(Keyspace::Meta, 2, None, false), vec![(3, vec![]), (2, vec![])]);
+        assert_eq!(rkeys(Keyspace::Meta, 4, None, false), vec![]);
 
         // raw writes and deletes
         store.put_raw(Keyspace::Extra, &[1; 16], Some(b"{\"raw\":true}")).unwrap();
@@ -295,6 +325,16 @@ mod tests {
         let details = store.details().unwrap();
         assert!(details.iter().any(|(k, _)| k == "meta"), "{details:?}");
         assert!(details.iter().all(|(_, v)| !v.is_empty()));
+
+        // deletes remove every keyspace entry; unknown keys are ignored
+        store.delete_batch(&[[1; 16], [3; 16], [9; 16]]).unwrap();
+        store.delete_batch(&[]).unwrap();
+        assert!(store.get_meta(&[1; 16]).unwrap().is_none());
+        assert!(store.get_text(&[1; 16]).unwrap().is_none());
+        assert!(store.get_extra(&[3; 16]).unwrap().is_none());
+        assert_eq!(keys(Keyspace::Meta, 0, None, false).iter().map(|(k, _)| *k).collect::<Vec<_>>(), vec![2, 8]);
+        assert_eq!(keys(Keyspace::Text, 0, None, false).len(), 2);
+        assert_eq!(keys(Keyspace::Extra, 0, None, false).len(), 0);
     }
 
     use super::NullStore as Empty;

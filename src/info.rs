@@ -84,7 +84,10 @@ mod tests {
             details: vec![("meta".into(), "1 MB".into())],
         };
         let s = rep.render();
-        assert!(s.starts_with("Store:      /x\nDocuments:  about 1,234\nDisk:       2.5 MB\nSources:    2 (a, b)\nFeatures:   len, bytes"), "{s}");
+        assert!(
+            s.starts_with("Store:      /x\nDocuments:  about 1,234\nDisk:       2.5 MB\nSources:    2 (a, b)\nFeatures:   len, bytes"),
+            "{s}"
+        );
         assert!(s.ends_with("meta:       1 MB\n"), "{s}");
         let none = InfoReport { sources: vec![], details: vec![], ..rep };
         assert!(none.render().contains("Sources:    0 (none)\n"));

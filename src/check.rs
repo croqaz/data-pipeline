@@ -147,9 +147,22 @@ impl CheckReport {
         if n == 0 {
             s.push_str(&format!("Check: OK, {} documents ({scope}), {} s\n", fmt_int(self.acc.meta), fmt_num(self.secs, 2)));
         } else {
-            s.push_str(&format!("Check: {} problem{} in {} documents ({scope}), {} s\n", fmt_int(n), if n == 1 { "" } else { "s" }, fmt_int(self.acc.meta), fmt_num(self.secs, 2)));
+            s.push_str(&format!(
+                "Check: {} problem{} in {} documents ({scope}), {} s\n",
+                fmt_int(n),
+                if n == 1 { "" } else { "s" },
+                fmt_int(self.acc.meta),
+                fmt_num(self.secs, 2)
+            ));
         }
-        s.push_str(&format!("  Keyspaces: meta {}, text {}, extra {}; {} source label{}\n", fmt_int(self.acc.meta), fmt_int(self.acc.text), fmt_int(self.acc.extra), self.sources, if self.sources == 1 { "" } else { "s" }));
+        s.push_str(&format!(
+            "  Keyspaces: meta {}, text {}, extra {}; {} source label{}\n",
+            fmt_int(self.acc.meta),
+            fmt_int(self.acc.text),
+            fmt_int(self.acc.extra),
+            self.sources,
+            if self.sources == 1 { "" } else { "s" }
+        ));
         for p in Problem::ALL {
             let c = self.acc.counts[p.index()];
             if c == 0 && (p.is_deep() && !self.deep) {
@@ -268,7 +281,10 @@ pub fn check(store: &dyn Store, sources: &Sources, opts: &CheckOptions) -> Resul
     let t0 = Instant::now();
     let threads = opts.threads.clamp(1, 256);
     let results: Vec<Result<Acc>> = std::thread::scope(|s| {
-        let handles: Vec<_> = (0..threads).filter_map(|t| range_for(t, threads)).map(|(lo, hi)| s.spawn(move || check_range(store, sources, opts, &lo, hi.as_ref()))).collect();
+        let handles: Vec<_> = (0..threads)
+            .filter_map(|t| range_for(t, threads))
+            .map(|(lo, hi)| s.spawn(move || check_range(store, sources, opts, &lo, hi.as_ref())))
+            .collect();
         handles.into_iter().map(|h| h.join().expect("check thread panicked")).collect()
     });
     let mut acc = Acc::new(opts.examples);
@@ -297,7 +313,13 @@ How vexingly quick daft zebras jump. The five boxing wizards jump quickly.";
         let f = features::compute(&text, features::DEFAULT_MAX_LEN, &mut scratch).unwrap();
         let meta = f.to_meta(source, extra.is_some());
         let mut key_scratch = Vec::new();
-        Record { key: doc_key(&text, &mut key_scratch), meta: meta.encode(), text: text.into_bytes(), extra: extra.map(|e| e.as_bytes().to_vec()), replace: false }
+        Record {
+            key: doc_key(&text, &mut key_scratch),
+            meta: meta.encode(),
+            text: text.into_bytes(),
+            extra: extra.map(|e| e.as_bytes().to_vec()),
+            replace: false,
+        }
     }
 
     fn fresh_store() -> (tempfile::TempDir, Box<dyn Store>, Sources) {
@@ -384,7 +406,10 @@ How vexingly quick daft zebras jump. The five boxing wizards jump quickly.";
         assert_eq!((shallow.acc.meta, shallow.acc.text, shallow.acc.extra), (9, 10, 4));
         let text = shallow.render();
         assert!(text.starts_with("Check: 9 problems in 9 documents (structure only"), "{text}");
-        assert!(text.contains("orphan text:                       2  e.g. 30303030303030303030303030303030, ffffffffffffffffffffffffffffffff"), "{text}");
+        assert!(
+            text.contains("orphan text:                       2  e.g. 30303030303030303030303030303030, ffffffffffffffffffffffffffffffff"),
+            "{text}"
+        );
         assert!(!text.contains("stale features"), "{text}");
         assert_eq!(failure(&shallow).to_string(), "store error: check found 9 problems");
 

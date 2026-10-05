@@ -269,7 +269,9 @@ fn fetch_chunk(store: &dyn Store, keys: &[Key], emitter: &Emitter<'_>, needs_tex
         let meta = Meta::decode(&meta_bytes)?;
         let text = if needs_text { Some(store.get_text(key)?.ok_or_else(|| missing("text"))?) } else { None };
         let text_str = match &text {
-            Some(t) => Some(std::str::from_utf8(t).map_err(|_| Error::Store(format!("text of document {} is not UTF-8", key_to_hex(key))))?),
+            Some(t) => {
+                Some(std::str::from_utf8(t).map_err(|_| Error::Store(format!("text of document {} is not UTF-8", key_to_hex(key))))?)
+            }
             None => None,
         };
         let extra = if needs_extra && meta.has_extra() { store.get_extra(key)? } else { None };
@@ -280,7 +282,14 @@ fn fetch_chunk(store: &dyn Store, keys: &[Key], emitter: &Emitter<'_>, needs_tex
 
 /// Phase 2: `threads` workers fetch and serialize chunks of keys; this
 /// thread writes them in order. At most `2 * threads` chunks are in flight.
-fn write_all(store: &dyn Store, keys: &[Key], emitter: &Emitter<'_>, sink: &mut Sink<'_>, opts: &ExportOptions, log: &mut dyn Write) -> Result<u64> {
+fn write_all(
+    store: &dyn Store,
+    keys: &[Key],
+    emitter: &Emitter<'_>,
+    sink: &mut Sink<'_>,
+    opts: &ExportOptions,
+    log: &mut dyn Write,
+) -> Result<u64> {
     if keys.is_empty() {
         return Ok(0);
     }
@@ -366,7 +375,8 @@ pub fn verify_file(path: &Path, threads: usize) -> Result<u64> {
                             if line.is_empty() {
                                 return Err(Error::Store(format!("{}:{lineno}: empty line", path.display())));
                             }
-                            sonic_rs::from_slice::<serde::de::IgnoredAny>(line).map_err(|e| Error::Store(format!("{}:{lineno}: {e}", path.display())))?;
+                            sonic_rs::from_slice::<serde::de::IgnoredAny>(line)
+                                .map_err(|e| Error::Store(format!("{}:{lineno}: {e}", path.display())))?;
                             n += 1;
                         }
                     }
@@ -412,6 +422,37 @@ fn verify_files(files: &[FileInfo], threads: usize) -> Result<VerifyReport> {
         lines += n;
     }
     Ok(VerifyReport { files: files.len(), lines, millis: t0.elapsed().as_millis() as u64 })
+}
+
+/// Write the given documents, all fields, to one plain JSONL file. Used by
+/// `delete --backup`; refuses an existing file unless `force`.
+pub fn export_keys(
+    store: &dyn Store,
+    sources: &Sources,
+    keys: &[Key],
+    path: &Path,
+    threads: usize,
+    force: bool,
+    log: &mut dyn Write,
+) -> Result<FileInfo> {
+    let fields = Fields::default();
+    let emitter = Emitter::new(&fields, None, "\n\n", sources);
+    let naming = Naming::new(path, false, None);
+    naming.check_targets(keys.len() as u64, force)?;
+    let mut opts = ExportOptions::new(PathBuf::new(), path.to_path_buf());
+    opts.threads = threads;
+    let mut sink = Sink::files(naming, 3, threads);
+    let written = write_all(store, keys, &emitter, &mut sink, &opts, log)?;
+    let files = sink.finish()?;
+    if written != keys.len() as u64 {
+        return Err(Error::Store(format!(
+            "{} documents selected but {} written to {}",
+            fmt_int(keys.len() as u64),
+            fmt_int(written),
+            path.display()
+        )));
+    }
+    Ok(files.into_iter().next().expect("one file"))
 }
 
 /// Run an export. Records go to `stdout` only with `--out -`; progress goes
@@ -504,21 +545,27 @@ mod tests {
         assert!(msg(&|o| o.limit = Some(0)).contains("--limit"));
         assert!(msg(&|o| o.shard = Some(0)).contains("--shard"));
         assert!(msg(&|o| o.zstd_level = 0).contains("--zstd-level"));
-        assert!(msg(&|o| {
-            o.out = PathBuf::from("-");
-            o.shard = Some(1);
-        })
-        .contains("--shard cannot"));
-        assert!(msg(&|o| {
-            o.out = PathBuf::from("-");
-            o.verify = true;
-        })
-        .contains("--verify cannot"));
-        assert!(msg(&|o| {
-            o.out = PathBuf::from("-");
-            o.zstd = true;
-        })
-        .contains("--zstd cannot"));
+        assert!(
+            msg(&|o| {
+                o.out = PathBuf::from("-");
+                o.shard = Some(1);
+            })
+            .contains("--shard cannot")
+        );
+        assert!(
+            msg(&|o| {
+                o.out = PathBuf::from("-");
+                o.verify = true;
+            })
+            .contains("--verify cannot")
+        );
+        assert!(
+            msg(&|o| {
+                o.out = PathBuf::from("-");
+                o.zstd = true;
+            })
+            .contains("--zstd cannot")
+        );
         let mut o = base.clone();
         o.out = PathBuf::from("-");
         assert!(o.to_stdout());
@@ -555,7 +602,16 @@ mod tests {
         assert!(s.contains("    /o-0001.jsonl  2 docs  1.5 MB\n"), "{s}");
         assert!(s.contains("Verified: 3 lines parse as JSON in 2 files (1.50 s)"), "{s}");
         assert!(s.contains("Skipped 2 metadata keys"), "{s}");
-        let one = ExportReport { files: vec![FileInfo { path: PathBuf::from("/o.jsonl"), docs: 3, bytes: 10 }], verify: None, expr: None, sample: None, top: None, limit: None, shadowed: 0, ..rep.clone() };
+        let one = ExportReport {
+            files: vec![FileInfo { path: PathBuf::from("/o.jsonl"), docs: 3, bytes: 10 }],
+            verify: None,
+            expr: None,
+            sample: None,
+            top: None,
+            limit: None,
+            shadowed: 0,
+            ..rep.clone()
+        };
         let s = one.render();
         assert!(s.starts_with("Exported 3 documents to /o.jsonl (0.0 MB)\n"), "{s}");
         assert!(s.contains("Scanned 10, matched 5\n"), "{s}");

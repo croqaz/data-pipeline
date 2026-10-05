@@ -98,10 +98,7 @@ fn resolve_slot(ast: &Ast, needs: &mut Needs) -> Result<Slot> {
                     Ok(Slot::Text)
                 }
                 "extra" => Err(err("`extra` must be followed by a key, like `extra.year`")),
-                _ => Err(err(format!(
-                    "unknown name `{name}`; valid names: {}, source, id, text, extra.<key>",
-                    feature_names().join(", ")
-                ))),
+                _ => Err(err(format!("unknown name `{name}`; valid names: {}, source, id, text, extra.<key>", feature_names().join(", ")))),
             }
         }
         Ast::Field(recv, key) => match recv.as_ref() {
@@ -196,13 +193,7 @@ pub fn compile(src: &str) -> Result<Compiled> {
     let ast = parse(src)?;
     let mut needs = Needs::default();
     let root = lower(&ast, &mut needs)?;
-    Ok(Compiled {
-        root,
-        needs_text: needs.text,
-        needs_extra: needs.extra,
-        needs_id: needs.id,
-        source: src.to_string(),
-    })
+    Ok(Compiled { root, needs_text: needs.text, needs_extra: needs.extra, needs_id: needs.id, source: src.to_string() })
 }
 
 #[cfg(test)]

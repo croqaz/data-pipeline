@@ -115,23 +115,13 @@ impl FeatureDef {
 
 macro_rules! int_feature {
     ($name:literal, $field:ident) => {
-        FeatureDef {
-            name: $name,
-            kind: Kind::Int,
-            get: |m| Some(f64::from(m.$field)),
-            raw: |m| Some(u64::from(m.$field)),
-        }
+        FeatureDef { name: $name, kind: Kind::Int, get: |m| Some(f64::from(m.$field)), raw: |m| Some(u64::from(m.$field)) }
     };
 }
 
 macro_rules! pct_feature {
     ($name:literal, $field:ident) => {
-        FeatureDef {
-            name: $name,
-            kind: Kind::Pct,
-            get: |m| Some(f64::from(m.$field) / 100.0),
-            raw: |m| Some(u64::from(m.$field)),
-        }
+        FeatureDef { name: $name, kind: Kind::Pct, get: |m| Some(f64::from(m.$field) / 100.0), raw: |m| Some(u64::from(m.$field)) }
     };
 }
 
@@ -146,24 +136,9 @@ pub const FEATURES: &[FeatureDef] = &[
     int_feature!("uniqChars", uniq_chars),
     pct_feature!("vowel", vowel),
     pct_feature!("alpha", alpha),
-    FeatureDef {
-        name: "entropy",
-        kind: Kind::Bits,
-        get: |m| m.entropy.map(|v| f64::from(v) / 100.0),
-        raw: |m| m.entropy.map(u64::from),
-    },
-    FeatureDef {
-        name: "compress",
-        kind: Kind::Pct,
-        get: |m| m.compress.map(|v| f64::from(v) / 100.0),
-        raw: |m| m.compress.map(u64::from),
-    },
-    FeatureDef {
-        name: "dictHit",
-        kind: Kind::Pct,
-        get: |m| m.dict_hit.map(|v| f64::from(v) / 100.0),
-        raw: |m| m.dict_hit.map(u64::from),
-    },
+    FeatureDef { name: "entropy", kind: Kind::Bits, get: |m| m.entropy.map(|v| f64::from(v) / 100.0), raw: |m| m.entropy.map(u64::from) },
+    FeatureDef { name: "compress", kind: Kind::Pct, get: |m| m.compress.map(|v| f64::from(v) / 100.0), raw: |m| m.compress.map(u64::from) },
+    FeatureDef { name: "dictHit", kind: Kind::Pct, get: |m| m.dict_hit.map(|v| f64::from(v) / 100.0), raw: |m| m.dict_hit.map(u64::from) },
 ];
 
 pub fn feature_index(name: &str) -> Option<usize> {

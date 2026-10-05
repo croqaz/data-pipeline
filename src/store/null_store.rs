@@ -32,7 +32,13 @@ impl Store for NullStore {
     fn iter<'a>(&'a self, _: Keyspace, _: &Key, _: Option<&Key>, _: bool) -> Result<KvIter<'a>> {
         Ok(Box::new(std::iter::empty()))
     }
+    fn iter_rev<'a>(&'a self, _: Keyspace, _: &Key, _: Option<&Key>, _: bool) -> Result<KvIter<'a>> {
+        Ok(Box::new(std::iter::empty()))
+    }
     fn put_raw(&self, _: Keyspace, _: &Key, _: Option<&[u8]>) -> Result<()> {
+        Ok(())
+    }
+    fn delete_batch(&self, _: &[Key]) -> Result<()> {
         Ok(())
     }
     fn compact(&self) -> Result<()> {
@@ -77,7 +83,9 @@ mod tests {
         assert_eq!(e.disk_size().unwrap(), 0);
         assert_eq!(e.approx_count().unwrap(), 0);
         assert_eq!(e.iter(Keyspace::Meta, &[0; 16], None, true).unwrap().count(), 0);
+        assert_eq!(e.iter_rev(Keyspace::Meta, &[0; 16], None, true).unwrap().count(), 0);
         e.put_raw(Keyspace::Text, &[0; 16], Some(b"x")).unwrap();
+        e.delete_batch(&[[0; 16]]).unwrap();
         e.compact().unwrap();
         assert!(e.details().unwrap().is_empty());
     }

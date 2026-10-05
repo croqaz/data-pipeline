@@ -30,11 +30,7 @@ pub struct WordScratch {
 
 impl Default for WordScratch {
     fn default() -> Self {
-        Self {
-            set: HashSet::with_hasher(IdentityBuild),
-            lower: Vec::with_capacity(64),
-            hasher: foldhash::fast::FixedState::default(),
-        }
+        Self { set: HashSet::with_hasher(IdentityBuild), lower: Vec::with_capacity(64), hasher: foldhash::fast::FixedState::default() }
     }
 }
 

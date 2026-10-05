@@ -1,5 +1,7 @@
 //! Command-line definitions (clap derive).
 
+#[cfg(test)]
+use std::path::Path;
 use std::path::PathBuf;
 
 use clap::{Args, Parser, Subcommand};
@@ -31,6 +33,10 @@ pub enum Command {
     Show(ShowArgs),
     /// Rewrite every keyspace into its most compact form.
     Compact(CompactArgs),
+    /// Remove documents by id or by expression; asks before doing it.
+    Delete(DeleteArgs),
+    /// Browse the store in a web browser: random, next, prev, query, count. Read-only.
+    Explore(ExploreArgs),
 }
 
 #[derive(Args, Debug, Clone)]
@@ -211,6 +217,50 @@ pub struct CompactArgs {
     pub store: StoreArgs,
 }
 
+#[derive(Args, Debug, Clone)]
+pub struct DeleteArgs {
+    #[command(flatten)]
+    pub store: StoreArgs,
+    /// Delete every document matching this expression.
+    pub expr: Option<String>,
+    /// Delete this document (32 hex characters or an unambiguous prefix); repeatable.
+    #[arg(long = "id", value_name = "ID")]
+    pub ids: Vec<String>,
+    /// Print the ids that would be deleted and change nothing.
+    #[arg(long)]
+    pub dry_run: bool,
+    /// Delete at most N documents (the first N in key order).
+    #[arg(short, long)]
+    pub limit: Option<u64>,
+    /// Skip the confirmation prompt.
+    #[arg(short = 'y', long)]
+    pub yes: bool,
+    /// Export the selected documents (all fields) to this JSONL file first.
+    #[arg(long)]
+    pub backup: Option<PathBuf>,
+    /// Overwrite an existing backup file.
+    #[arg(long)]
+    pub force: bool,
+    /// Scan threads (default: all logical CPUs).
+    #[arg(short, long)]
+    pub threads: Option<usize>,
+}
+
+#[derive(Args, Debug, Clone)]
+pub struct ExploreArgs {
+    #[command(flatten)]
+    pub store: StoreArgs,
+    /// TCP port to listen on (0 picks a free one).
+    #[arg(short, long, default_value_t = crate::explore::DEFAULT_PORT)]
+    pub port: u16,
+    /// Address to bind; keep the default unless you want other machines in.
+    #[arg(long, default_value = "127.0.0.1")]
+    pub bind: String,
+    /// Scan threads for count (default: all logical CPUs).
+    #[arg(short, long)]
+    pub threads: Option<usize>,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -226,14 +276,32 @@ mod tests {
         let cli = Cli::try_parse_from(["pipeline", "stats", "--db", "x", "words > 1"]).unwrap();
         let Command::Stats(a) = cli.cmd else { panic!() };
         assert_eq!(a.expr.as_deref(), Some("words > 1"));
-        assert!(Cli::try_parse_from(["pipeline", "stats", "--db", "x", "--backend", "fjall"]).is_err(), "the engine is not a choice any more");
+        assert!(
+            Cli::try_parse_from(["pipeline", "stats", "--db", "x", "--backend", "fjall"]).is_err(),
+            "the engine is not a choice any more"
+        );
         let cli = Cli::try_parse_from(["pipeline", "count", "--db", "x", "-t", "2"]).unwrap();
         let Command::Count(a) = cli.cmd else { panic!() };
         assert_eq!(a.threads, Some(2));
         assert!(a.expr.is_none());
         assert!(Cli::try_parse_from(["pipeline", "import", "--db", "x"]).is_err());
         assert!(Cli::try_parse_from(["pipeline", "nope"]).is_err());
-        let cli = Cli::try_parse_from(["pipeline", "export", "--db", "x", "-o", "o.jsonl", "-f", "id,text", "--sample", "0.5", "--header", "T: {extra.t}", "words > 1"]).unwrap();
+        let cli = Cli::try_parse_from([
+            "pipeline",
+            "export",
+            "--db",
+            "x",
+            "-o",
+            "o.jsonl",
+            "-f",
+            "id,text",
+            "--sample",
+            "0.5",
+            "--header",
+            "T: {extra.t}",
+            "words > 1",
+        ])
+        .unwrap();
         let Command::Export(a) = cli.cmd else { panic!() };
         assert_eq!(a.fields, vec!["id", "text"]);
         assert_eq!(a.sample, Some(0.5));
@@ -243,7 +311,19 @@ mod tests {
         assert_eq!(a.zstd_level, 3);
         assert!(Cli::try_parse_from(["pipeline", "export", "--db", "x"]).is_err(), "--out is required");
         assert!(Cli::try_parse_from(["pipeline", "export", "--db", "x", "-o", "o", "--header", "a", "--header-file", "f"]).is_err());
-        let cli = Cli::try_parse_from(["pipeline", "export", "--db", "x", "-o", "o", "--header", "---\\ntitle = {extra.title}\\n---", "--header-sep", "-"]).unwrap();
+        let cli = Cli::try_parse_from([
+            "pipeline",
+            "export",
+            "--db",
+            "x",
+            "-o",
+            "o",
+            "--header",
+            "---\\ntitle = {extra.title}\\n---",
+            "--header-sep",
+            "-",
+        ])
+        .unwrap();
         let Command::Export(a) = cli.cmd else { panic!() };
         assert_eq!(a.header.as_deref(), Some("---\\ntitle = {extra.title}\\n---"), "a template may start with a dash");
         assert_eq!(a.header_sep, "-");
@@ -258,5 +338,21 @@ mod tests {
         assert!(Cli::try_parse_from(["pipeline", "show", "--db", "x"]).is_err(), "an id is required");
         assert!(matches!(Cli::try_parse_from(["pipeline", "info", "--db", "x"]).unwrap().cmd, Command::Info(_)));
         assert!(matches!(Cli::try_parse_from(["pipeline", "compact", "--db", "x"]).unwrap().cmd, Command::Compact(_)));
+        let cli =
+            Cli::try_parse_from(["pipeline", "delete", "--db", "x", "--id", "abcd", "--id", "ef01", "-y", "--backup", "b.jsonl"]).unwrap();
+        let Command::Delete(a) = cli.cmd else { panic!() };
+        assert_eq!(a.ids, vec!["abcd", "ef01"]);
+        assert!(a.yes && !a.dry_run && a.expr.is_none());
+        assert_eq!(a.backup.as_deref(), Some(Path::new("b.jsonl")));
+        let cli = Cli::try_parse_from(["pipeline", "delete", "--db", "x", "--dry-run", "--limit", "3", "words < 5"]).unwrap();
+        let Command::Delete(a) = cli.cmd else { panic!() };
+        assert_eq!((a.dry_run, a.limit, a.expr.as_deref()), (true, Some(3), Some("words < 5")));
+        let cli = Cli::try_parse_from(["pipeline", "explore", "--db", "x"]).unwrap();
+        let Command::Explore(a) = cli.cmd else { panic!() };
+        assert_eq!((a.port, a.bind.as_str(), a.threads), (8080, "127.0.0.1", None));
+        let cli = Cli::try_parse_from(["pipeline", "explore", "--db", "x", "-p", "0", "--bind", "0.0.0.0", "-t", "2"]).unwrap();
+        let Command::Explore(a) = cli.cmd else { panic!() };
+        assert_eq!((a.port, a.bind.as_str(), a.threads), (0, "0.0.0.0", Some(2)));
+        assert!(Cli::try_parse_from(["pipeline", "explore", "--db", "x", "-p", "70000"]).is_err(), "a port fits in 16 bits");
     }
 }
