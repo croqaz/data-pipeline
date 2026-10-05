@@ -5,6 +5,7 @@
  "all_caps_headline": {
   "alpha": 10000,
   "bytes": 116,
+  "entropy": 450,
   "len": 116,
   "sentences": 3,
   "uniqChars": 28,
@@ -15,6 +16,7 @@
  "archaic_long_s": {
   "alpha": 6977,
   "bytes": 265,
+  "entropy": 429,
   "len": 248,
   "sentences": 1,
   "uniqChars": 34,
@@ -25,6 +27,7 @@
  "cjk_only": {
   "alpha": 0,
   "bytes": 453,
+  "entropy": 372,
   "len": 153,
   "sentences": 1,
   "uniqChars": 14,
@@ -44,6 +47,7 @@
  "json_escapes": {
   "alpha": 9412,
   "bytes": 249,
+  "entropy": 407,
   "len": 246,
   "sentences": 6,
   "uniqChars": 26,
@@ -54,6 +58,7 @@
  "ledger": {
   "alpha": 2273,
   "bytes": 300,
+  "entropy": 373,
   "len": 299,
   "sentences": 13,
   "uniqChars": 24,
@@ -64,6 +69,7 @@
  "long_prose": {
   "alpha": 10000,
   "bytes": 57600,
+  "entropy": 396,
   "len": 57600,
   "sentences": 200,
   "uniqChars": 28,
@@ -77,6 +83,7 @@
  "mixed_unicode": {
   "alpha": 8889,
   "bytes": 243,
+  "entropy": 509,
   "len": 215,
   "sentences": 7,
   "uniqChars": 61,
@@ -90,6 +97,7 @@
  "numbers_and_symbols": {
   "alpha": 0,
   "bytes": 131,
+  "entropy": 421,
   "len": 131,
   "sentences": 1,
   "uniqChars": 26,
@@ -100,6 +108,7 @@
  "ocr_noise": {
   "alpha": 9231,
   "bytes": 225,
+  "entropy": 478,
   "len": 225,
   "sentences": 3,
   "uniqChars": 44,
@@ -110,6 +119,7 @@
  "prose": {
   "alpha": 10000,
   "bytes": 286,
+  "entropy": 392,
   "len": 286,
   "sentences": 1,
   "uniqChars": 27,
@@ -120,6 +130,7 @@
  "raven": {
   "alpha": 10000,
   "bytes": 515,
+  "entropy": 453,
   "len": 515,
   "sentences": 5,
   "uniqChars": 38,

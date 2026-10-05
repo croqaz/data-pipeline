@@ -6,7 +6,7 @@ use std::sync::Mutex;
 use crate::error::Result;
 use crate::hash::Key;
 
-use super::{Backend, Record, ScanFn, Store};
+use super::{Keyspace, KvIter, Record, ScanFn, Store};
 
 #[derive(Default)]
 pub struct NullStore {
@@ -14,9 +14,6 @@ pub struct NullStore {
 }
 
 impl Store for NullStore {
-    fn backend(&self) -> Backend {
-        Backend::Fjall
-    }
     fn put_batch(&self, _: &[Record]) -> Result<()> {
         Ok(())
     }
@@ -31,6 +28,18 @@ impl Store for NullStore {
     }
     fn scan_meta(&self, _: &Key, _: Option<&Key>, _: &mut ScanFn<'_>) -> Result<()> {
         Ok(())
+    }
+    fn iter<'a>(&'a self, _: Keyspace, _: &Key, _: Option<&Key>, _: bool) -> Result<KvIter<'a>> {
+        Ok(Box::new(std::iter::empty()))
+    }
+    fn put_raw(&self, _: Keyspace, _: &Key, _: Option<&[u8]>) -> Result<()> {
+        Ok(())
+    }
+    fn compact(&self) -> Result<()> {
+        Ok(())
+    }
+    fn details(&self) -> Result<Vec<(String, String)>> {
+        Ok(Vec::new())
     }
     fn sources(&self) -> Result<Vec<(u16, String)>> {
         Ok(self.sources.lock().expect("lock").clone())
@@ -57,7 +66,6 @@ mod tests {
     #[test]
     fn answers_every_call_with_nothing() {
         let e = NullStore::default();
-        assert_eq!(e.backend(), Backend::Fjall);
         e.put_batch(&[]).unwrap();
         assert!(e.get_meta(&[0; 16]).unwrap().is_none());
         assert!(e.get_text(&[0; 16]).unwrap().is_none());
@@ -68,5 +76,9 @@ mod tests {
         e.persist().unwrap();
         assert_eq!(e.disk_size().unwrap(), 0);
         assert_eq!(e.approx_count().unwrap(), 0);
+        assert_eq!(e.iter(Keyspace::Meta, &[0; 16], None, true).unwrap().count(), 0);
+        e.put_raw(Keyspace::Text, &[0; 16], Some(b"x")).unwrap();
+        e.compact().unwrap();
+        assert!(e.details().unwrap().is_empty());
     }
 }

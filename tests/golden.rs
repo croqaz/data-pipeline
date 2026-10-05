@@ -24,6 +24,7 @@ struct Expected {
     uniq_chars: Option<u32>,
     vowel: Option<u16>,
     alpha: Option<u16>,
+    entropy: Option<u16>,
 }
 
 #[test]
@@ -41,7 +42,7 @@ fn golden() {
             Ok(f) => {
                 assert!(want.drop.is_none(), "{} should have been dropped", case.name);
                 let meta = f.to_meta(0, false);
-                let got = (f.len, f.bytes, f.words, f.uniq_words, f.sentences, f.uniq_chars, meta.vowel, meta.alpha);
+                let got = (f.len, f.bytes, f.words, f.uniq_words, f.sentences, f.uniq_chars, meta.vowel, meta.alpha, meta.entropy.unwrap());
                 let want = (
                     want.len.unwrap(),
                     want.bytes.unwrap(),
@@ -51,7 +52,9 @@ fn golden() {
                     want.uniq_chars.unwrap(),
                     want.vowel.unwrap(),
                     want.alpha.unwrap(),
+                    want.entropy.unwrap(),
                 );
+                assert!(meta.compress.is_some_and(|c| c > 0), "{}", case.name);
                 assert_eq!(got, want, "{}", case.name);
             }
         }

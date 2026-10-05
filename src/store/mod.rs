@@ -1,16 +1,14 @@
-//! The storage layer: one trait, two backends (fjall and RocksDB), chosen
-//! per store at creation and remembered in a marker file.
+//! The storage layer: one trait and one engine, fjall, chosen after the
+//! 20 GB bake-off of 2026-10-05 (see BENCHMARKS.md). A marker file names
+//! the engine so a directory is recognised as a pipeline store.
 //!
 //! Every document lives in three keyspaces under the same 16-byte key:
 //! `meta` (CBOR features), `text` (raw UTF-8) and `extra` (raw JSON object of
 //! the metadata fields that rode along, absent when there were none). Two
 //! small keyspaces hold the interned source labels and the schema marker.
 
-#[cfg(feature = "fjall")]
 pub mod fjall_store;
 pub mod null_store;
-#[cfg(feature = "rocksdb")]
-pub mod rocks_store;
 
 pub use null_store::NullStore;
 
@@ -21,36 +19,9 @@ use crate::error::{Error, Result};
 use crate::hash::Key;
 
 pub const MARKER_FILE: &str = "pipeline.backend";
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
-pub enum Backend {
-    Fjall,
-    Rocksdb,
-}
-
-impl Backend {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Backend::Fjall => "fjall",
-            Backend::Rocksdb => "rocksdb",
-        }
-    }
-
-    pub fn parse(s: &str) -> Option<Backend> {
-        match s.trim() {
-            "fjall" => Some(Backend::Fjall),
-            "rocksdb" => Some(Backend::Rocksdb),
-            _ => None,
-        }
-    }
-
-    pub fn available(self) -> bool {
-        match self {
-            Backend::Fjall => cfg!(feature = "fjall"),
-            Backend::Rocksdb => cfg!(feature = "rocksdb"),
-        }
-    }
-}
+/// What the marker file says. Stores written while other engines existed
+/// carry the same word, so they keep opening.
+pub const ENGINE: &str = "fjall";
 
 /// One document ready to be written.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -59,13 +30,39 @@ pub struct Record {
     pub meta: Vec<u8>,
     pub text: Vec<u8>,
     pub extra: Option<Vec<u8>>,
+    /// This record overwrites a stored document, so a stale `extra` must be
+    /// removed when the new one has none. A fresh document never writes to
+    /// `extra` unless it has metadata: no tombstone per document.
+    pub replace: bool,
 }
 
 /// Callback for scans; return `Ok(false)` to stop early.
 pub type ScanFn<'a> = dyn FnMut(&Key, &[u8]) -> Result<bool> + 'a;
 
+/// The three per-document keyspaces.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Keyspace {
+    Meta,
+    Text,
+    Extra,
+}
+
+impl Keyspace {
+    pub const ALL: [Keyspace; 3] = [Keyspace::Meta, Keyspace::Text, Keyspace::Extra];
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Keyspace::Meta => "meta",
+            Keyspace::Text => "text",
+            Keyspace::Extra => "extra",
+        }
+    }
+}
+
+/// A pull iterator over one keyspace in key order.
+pub type KvIter<'a> = Box<dyn Iterator<Item = Result<(Key, Vec<u8>)>> + 'a>;
+
 pub trait Store: Send + Sync {
-    fn backend(&self) -> Backend;
     /// Write a batch atomically across keyspaces.
     fn put_batch(&self, records: &[Record]) -> Result<()>;
     fn get_meta(&self, key: &Key) -> Result<Option<Vec<u8>>>;
@@ -73,6 +70,17 @@ pub trait Store: Send + Sync {
     fn get_extra(&self, key: &Key) -> Result<Option<Vec<u8>>>;
     /// Scan `meta` for keys in `[lo, hi)` (`hi == None` means to the end).
     fn scan_meta(&self, lo: &Key, hi: Option<&Key>, f: &mut ScanFn<'_>) -> Result<()>;
+    /// Iterate one keyspace over `[lo, hi)`. With `values == false` every
+    /// value is empty and the engine skips reading it where it can.
+    fn iter<'a>(&'a self, ks: Keyspace, lo: &Key, hi: Option<&Key>, values: bool) -> Result<KvIter<'a>>;
+    /// Write (`Some`) or delete (`None`) one value in one keyspace. The
+    /// low-level primitive behind delete and recompute; `put_batch` is the
+    /// consistent way to add a document.
+    fn put_raw(&self, ks: Keyspace, key: &Key, value: Option<&[u8]>) -> Result<()>;
+    /// Rewrite every keyspace into its most compact form and wait for it.
+    fn compact(&self) -> Result<()>;
+    /// Engine facts for `info`, as (label, value) pairs.
+    fn details(&self) -> Result<Vec<(String, String)>>;
     /// All stored source labels.
     fn sources(&self) -> Result<Vec<(u16, String)>>;
     fn put_source(&self, id: u16, label: &str) -> Result<()>;
@@ -140,69 +148,38 @@ impl Sources {
     }
 }
 
-fn read_marker(dir: &Path) -> Result<Option<Backend>> {
+/// Is `dir` a pipeline store, or a place one may be created?
+/// A missing or empty directory is new (allowed only with `create`); an
+/// existing store must carry the marker with the right engine name.
+pub fn check_dir(dir: &Path, create: bool) -> Result<()> {
     let path = dir.join(MARKER_FILE);
     match std::fs::read_to_string(&path) {
-        Ok(s) => Backend::parse(&s)
-            .map(Some)
-            .ok_or_else(|| Error::Store(format!("{} names an unknown backend {:?}", path.display(), s.trim()))),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
-        Err(e) => Err(e.into()),
-    }
-}
-
-/// Decide which backend a store directory uses. A new (missing or empty)
-/// directory takes `requested` or fjall; an existing store must match.
-pub fn resolve_backend(dir: &Path, requested: Option<Backend>, create: bool) -> Result<Backend> {
-    let exists = dir.is_dir();
-    let has_marker = read_marker(dir)?;
-    match has_marker {
-        Some(found) => {
-            if let Some(req) = requested
-                && req != found
-            {
-                return Err(Error::Usage(format!(
-                    "{} is a {} store; `--backend {}` does not match",
-                    dir.display(),
-                    found.as_str(),
-                    req.as_str()
-                )));
-            }
-            Ok(found)
-        }
-        None => {
-            let empty = !exists || std::fs::read_dir(dir)?.next().is_none();
+        Ok(s) if s.trim() == ENGINE => Ok(()),
+        Ok(s) => Err(Error::Store(format!("{} names an unknown engine {:?}; this build only reads {ENGINE} stores", path.display(), s.trim()))),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            let empty = !dir.is_dir() || std::fs::read_dir(dir)?.next().is_none();
             if !empty {
                 return Err(Error::Usage(format!("{} exists but is not a pipeline store (no {MARKER_FILE})", dir.display())));
             }
             if !create {
                 return Err(Error::Usage(format!("{} is not a pipeline store", dir.display())));
             }
-            Ok(requested.unwrap_or(Backend::Fjall))
+            Ok(())
         }
+        Err(e) => Err(e.into()),
     }
 }
 
 /// Open (or create, when `create` is set) the store at `dir`.
-pub fn open(dir: &Path, requested: Option<Backend>, create: bool) -> Result<Box<dyn Store>> {
-    let backend = resolve_backend(dir, requested, create)?;
-    if !backend.available() {
-        return Err(Error::Usage(format!("this binary was built without the {} backend", backend.as_str())));
-    }
+pub fn open(dir: &Path, create: bool) -> Result<Box<dyn Store>> {
+    check_dir(dir, create)?;
     if create {
         std::fs::create_dir_all(dir)?;
     }
-    let store: Box<dyn Store> = match backend {
-        #[cfg(feature = "fjall")]
-        Backend::Fjall => Box::new(fjall_store::FjallStore::open(dir)?),
-        #[cfg(feature = "rocksdb")]
-        Backend::Rocksdb => Box::new(rocks_store::RocksStore::open(dir)?),
-        #[allow(unreachable_patterns)]
-        _ => unreachable!("availability checked above"),
-    };
+    let store: Box<dyn Store> = Box::new(fjall_store::FjallStore::open(dir)?);
     let marker = dir.join(MARKER_FILE);
     if !marker.exists() {
-        std::fs::write(&marker, format!("{}\n", backend.as_str()))?;
+        std::fs::write(&marker, format!("{ENGINE}\n"))?;
     }
     Ok(store)
 }
@@ -219,10 +196,10 @@ mod tests {
 
     pub(crate) fn rec(byte: u8, words: u32, extra: Option<&str>) -> Record {
         let meta = crate::meta::Meta { words, ..Default::default() }.encode();
-        Record { key: [byte; 16], meta, text: format!("text {byte}").into_bytes(), extra: extra.map(|s| s.as_bytes().to_vec()) }
+        Record { key: [byte; 16], meta, text: format!("text {byte}").into_bytes(), extra: extra.map(|s| s.as_bytes().to_vec()), replace: false }
     }
 
-    /// The behavioural contract every backend must satisfy.
+    /// The behavioural contract the store must satisfy.
     pub(crate) fn exercise(store: &dyn Store) {
         assert_eq!(store.approx_count().unwrap(), 0);
         assert!(store.get_meta(&[1; 16]).unwrap().is_none());
@@ -263,6 +240,13 @@ mod tests {
         store.put_batch(&[rec(2, 99, Some("{}"))]).unwrap();
         assert_eq!(crate::meta::Meta::decode(&store.get_meta(&[2; 16]).unwrap().unwrap()).unwrap().words, 99);
         assert_eq!(store.get_extra(&[2; 16]).unwrap().unwrap(), b"{}");
+        // without `replace`, a record with no extra writes nothing to `extra`
+        store.put_batch(&[rec(2, 100, None)]).unwrap();
+        assert_eq!(store.get_extra(&[2; 16]).unwrap().unwrap(), b"{}");
+        // with it, the stale extra goes
+        store.put_batch(&[Record { replace: true, ..rec(2, 101, None) }]).unwrap();
+        assert!(store.get_extra(&[2; 16]).unwrap().is_none());
+        assert_eq!(crate::meta::Meta::decode(&store.get_meta(&[2; 16]).unwrap().unwrap()).unwrap().words, 101);
 
         // sources
         assert!(store.sources().unwrap().is_empty());
@@ -274,6 +258,43 @@ mod tests {
         assert!(store.disk_size().unwrap() > 0);
         let approx = store.approx_count().unwrap();
         assert!((1..=10).contains(&approx), "approx {approx}");
+
+        // pull iterators, with and without values, bounded and unbounded
+        let keys = |ks: Keyspace, lo: u8, hi: Option<u8>, values: bool| -> Vec<(u8, Vec<u8>)> {
+            let hi = hi.map(|h| [h; 16]);
+            store.iter(ks, &[lo; 16], hi.as_ref(), values).unwrap().map(|r| r.unwrap()).map(|(k, v)| (k[0], v)).collect()
+        };
+        assert_eq!(keys(Keyspace::Text, 0, None, true), vec![(1, b"text 1".to_vec()), (2, b"text 2".to_vec()), (3, b"text 3".to_vec())]);
+        assert_eq!(keys(Keyspace::Text, 0, None, false), vec![(1, vec![]), (2, vec![]), (3, vec![])]);
+        assert_eq!(keys(Keyspace::Extra, 0, None, true), vec![(3, b"{\"a\":1}".to_vec())], "key 2's extra was removed by the replace above");
+        assert_eq!(keys(Keyspace::Meta, 2, Some(3), false), vec![(2, vec![])]);
+        assert_eq!(keys(Keyspace::Meta, 4, None, false), vec![]);
+
+        // raw writes and deletes
+        store.put_raw(Keyspace::Extra, &[1; 16], Some(b"{\"raw\":true}")).unwrap();
+        assert_eq!(store.get_extra(&[1; 16]).unwrap().unwrap(), b"{\"raw\":true}");
+        store.put_raw(Keyspace::Extra, &[1; 16], None).unwrap();
+        assert!(store.get_extra(&[1; 16]).unwrap().is_none());
+        store.put_raw(Keyspace::Text, &[7; 16], Some(b"orphan")).unwrap();
+        store.put_raw(Keyspace::Meta, &[7; 16], Some(b"\xff")).unwrap();
+        assert_eq!(keys(Keyspace::Text, 7, None, true), vec![(7, b"orphan".to_vec())]);
+        store.put_raw(Keyspace::Text, &[7; 16], None).unwrap();
+        store.put_raw(Keyspace::Meta, &[7; 16], None).unwrap();
+        assert!(store.get_text(&[7; 16]).unwrap().is_none());
+
+        // a text above the blob threshold, so the engines that separate values have a blob file
+        let big = Record { key: [8; 16], meta: crate::meta::Meta::default().encode(), text: vec![b'x'; 4096], extra: None, replace: false };
+        store.put_batch(&[big]).unwrap();
+        store.persist().unwrap();
+        assert_eq!(store.get_text(&[8; 16]).unwrap().unwrap().len(), 4096);
+
+        // compaction keeps everything readable
+        store.compact().unwrap();
+        assert_eq!(store.get_text(&[2; 16]).unwrap().unwrap(), b"text 2");
+        assert_eq!(keys(Keyspace::Meta, 0, None, false).len(), 4);
+        let details = store.details().unwrap();
+        assert!(details.iter().any(|(k, _)| k == "meta"), "{details:?}");
+        assert!(details.iter().all(|(_, v)| !v.is_empty()));
     }
 
     use super::NullStore as Empty;
@@ -281,7 +302,6 @@ mod tests {
     #[test]
     fn empty_store_double_answers_every_call() {
         let e = Empty::default();
-        assert_eq!(e.backend(), Backend::Fjall);
         e.put_batch(&[]).unwrap();
         assert!(e.get_meta(&[0; 16]).unwrap().is_none());
         assert!(e.get_text(&[0; 16]).unwrap().is_none());
@@ -290,6 +310,7 @@ mod tests {
         e.persist().unwrap();
         assert_eq!(e.disk_size().unwrap(), 0);
         assert_eq!(e.approx_count().unwrap(), 0);
+        assert_eq!(Keyspace::ALL.iter().map(|k| k.as_str()).collect::<Vec<_>>(), vec!["meta", "text", "extra"]);
     }
 
     #[test]
@@ -323,58 +344,48 @@ mod tests {
     }
 
     #[test]
-    fn backend_names() {
-        assert_eq!(Backend::parse("fjall"), Some(Backend::Fjall));
-        assert_eq!(Backend::parse(" rocksdb\n"), Some(Backend::Rocksdb));
-        assert_eq!(Backend::parse("sled"), None);
-        assert_eq!(Backend::Fjall.as_str(), "fjall");
-        assert_eq!(Backend::Rocksdb.as_str(), "rocksdb");
-        assert!(Backend::Fjall.available());
-    }
-
-    #[test]
-    fn resolve_backend_rules() {
+    fn store_dir_rules() {
         let dir = tempfile::tempdir().unwrap();
         let missing = dir.path().join("new");
-        assert_eq!(resolve_backend(&missing, None, true).unwrap(), Backend::Fjall);
-        assert_eq!(resolve_backend(&missing, Some(Backend::Rocksdb), true).unwrap(), Backend::Rocksdb);
-        assert!(resolve_backend(&missing, None, false).is_err());
+        check_dir(&missing, true).unwrap();
+        assert!(check_dir(&missing, false).unwrap_err().to_string().contains("not a pipeline store"));
         // empty dir counts as new
         let empty = dir.path().join("empty");
         std::fs::create_dir(&empty).unwrap();
-        assert_eq!(resolve_backend(&empty, None, true).unwrap(), Backend::Fjall);
+        check_dir(&empty, true).unwrap();
         // non-empty dir without marker is refused
         let foreign = dir.path().join("foreign");
         std::fs::create_dir(&foreign).unwrap();
         std::fs::write(foreign.join("x"), b"x").unwrap();
-        assert!(resolve_backend(&foreign, None, true).unwrap_err().to_string().contains("not a pipeline store"));
-        // marker wins, mismatch is an error
+        assert!(check_dir(&foreign, true).unwrap_err().to_string().contains("not a pipeline store"));
+        // the marker must name this engine
         let marked = dir.path().join("marked");
         std::fs::create_dir(&marked).unwrap();
+        std::fs::write(marker_path(&marked), "fjall\n").unwrap();
+        check_dir(&marked, false).unwrap();
         std::fs::write(marker_path(&marked), "rocksdb\n").unwrap();
-        assert_eq!(resolve_backend(&marked, None, false).unwrap(), Backend::Rocksdb);
-        assert_eq!(resolve_backend(&marked, Some(Backend::Rocksdb), false).unwrap(), Backend::Rocksdb);
-        assert!(resolve_backend(&marked, Some(Backend::Fjall), false).unwrap_err().to_string().contains("does not match"));
-        std::fs::write(marker_path(&marked), "sled\n").unwrap();
-        assert!(resolve_backend(&marked, None, false).unwrap_err().to_string().contains("unknown backend"));
+        let e = check_dir(&marked, false).unwrap_err().to_string();
+        assert!(e.contains("unknown engine \"rocksdb\"") && e.contains("only reads fjall"), "{e}");
+        assert_eq!(check_dir(&marked, false).unwrap_err().exit_code(), 1);
         // unreadable marker (a directory) is an io error
         let weird = dir.path().join("weird");
         std::fs::create_dir_all(marker_path(&weird)).unwrap();
-        assert!(resolve_backend(&weird, None, false).is_err());
+        assert!(check_dir(&weird, false).is_err());
     }
 
     #[test]
     fn open_creates_marker_and_reopens() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("db");
-        let store = open(&path, None, true).unwrap();
-        assert_eq!(store.backend(), Backend::Fjall);
+        let store = open(&path, true).unwrap();
+        store.put_batch(&[rec(1, 1, None)]).unwrap();
         drop(store);
-        assert_eq!(std::fs::read_to_string(marker_path(&path)).unwrap().trim(), "fjall");
-        let store = open(&path, None, false).unwrap();
-        assert_eq!(store.backend(), Backend::Fjall);
+        assert_eq!(std::fs::read_to_string(marker_path(&path)).unwrap().trim(), ENGINE);
+        let store = open(&path, false).unwrap();
+        assert!(store.get_text(&[1; 16]).unwrap().is_some());
         drop(store);
-        assert!(open(&path, Some(Backend::Rocksdb), false).is_err());
-        assert!(open(&dir.path().join("nope"), None, false).is_err());
+        std::fs::write(marker_path(&path), "redb\n").unwrap();
+        assert!(open(&path, false).is_err());
+        assert!(open(&dir.path().join("nope"), false).is_err());
     }
 }

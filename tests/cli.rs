@@ -1,9 +1,8 @@
-//! End-to-end tests: every subcommand and error path, in-process, on both
-//! backends.
+//! End-to-end tests: every subcommand and error path, in-process.
 
 use std::path::{Path, PathBuf};
 
-use pipeline::store::{self, Backend};
+use pipeline::store;
 
 const PROSE: &str = "The quick brown fox jumps over the lazy dog. Pack my box with five dozen liquor jugs! \
 How vexingly quick daft zebras jump. The five boxing wizards jump quickly.";
@@ -42,24 +41,20 @@ fn mixed_file(dir: &Path) -> PathBuf {
     write(dir, "mixed.jsonl", &lines)
 }
 
-fn backends() -> Vec<&'static str> {
-    vec!["fjall", "rocksdb"]
-}
-
 #[test]
-fn import_stats_count_on_both_backends() {
-    for backend in backends() {
+fn import_stats_count() {
+    {
         let dir = tempfile::tempdir().unwrap();
         let input = mixed_file(dir.path());
         let db = dir.path().join("db");
-        let (code, out, err) = run(&["import", "--db", db.to_str().unwrap(), "--backend", backend, "-w", "2", input.to_str().unwrap()]);
+        let (code, out, err) = run(&["import", "--db", db.to_str().unwrap(), "-w", "2", input.to_str().unwrap()]);
         assert_eq!(code, 0, "{err}");
         assert!(out.contains("Lines:                 9  (0 skipped by --offset, 1 empty)"), "{out}");
         assert!(out.contains("bad_json 1, not_object 1, no_text 1, too_short 1"), "{out}");
         assert!(out.contains("Duplicates:            1"), "{out}");
         assert!(out.contains("Indexed:               3"), "{out}");
-        assert!(out.contains(&format!("Store: {backend} backend")), "{out}");
-        assert_eq!(std::fs::read_to_string(store::marker_path(&db)).unwrap().trim(), backend);
+        assert!(out.contains("Store: about 3 documents"), "{out}");
+        assert_eq!(std::fs::read_to_string(store::marker_path(&db)).unwrap().trim(), store::ENGINE);
 
         let (code, out, _) = run(&["stats", "--db", db.to_str().unwrap()]);
         assert_eq!(code, 0);
@@ -76,12 +71,6 @@ fn import_stats_count_on_both_backends() {
         let (_, out, _) = run(&["count", "--db", db.to_str().unwrap(), "source == \"cli\" && text.contains(\"[2]\")"]);
         assert_eq!(out, "1 / 3 documents match (33.333%).\n");
 
-        // backend mismatch is a usage error
-        let other = if backend == "fjall" { "rocksdb" } else { "fjall" };
-        let (code, _, err) = run(&["count", "--db", db.to_str().unwrap(), "--backend", other]);
-        assert_eq!(code, 2);
-        assert!(err.contains("does not match"), "{err}");
-
         // re-import is a no-op: everything is a duplicate
         let (code, out, _) = run(&["import", "--db", db.to_str().unwrap(), input.to_str().unwrap()]);
         assert_eq!(code, 0);
@@ -89,6 +78,7 @@ fn import_stats_count_on_both_backends() {
         assert!(out.contains("Indexed:               0"), "{out}");
         let (_, out, _) = run(&["count", "--db", db.to_str().unwrap()]);
         assert_eq!(out, "3 / 3 documents match (100.000%).\n");
+
     }
 }
 
@@ -199,7 +189,7 @@ fn conflicts_replace_or_keep_by_score() {
 type Row = (String, Vec<u8>, Vec<u8>, Option<Vec<u8>>);
 
 fn dump(db: &Path) -> Vec<Row> {
-    let store = store::open(db, None, false).unwrap();
+    let store = store::open(db, false).unwrap();
     let mut rows = Vec::new();
     store
         .scan_meta(&[0; 16], None, &mut |k, m| {
@@ -337,5 +327,309 @@ fn library_options_default_sensibly() {
     let mut log = Vec::new();
     let err = pipeline::import::import(&opts, &mut log).unwrap_err();
     assert!(err.to_string().contains("at least one input"));
-    assert!(Backend::Fjall.available());
+
+    let opts = pipeline::export::ExportOptions::new(PathBuf::from("x"), PathBuf::from("o.jsonl"));
+    assert_eq!(opts.header_sep, "\n\n");
+    assert_eq!(opts.progress_every, 100_000);
+    assert!(opts.fields.is_empty() && !opts.verify && !opts.force);
+}
+
+#[test]
+fn export_progress_lines_follow_the_interval() {
+    let dir = tempfile::tempdir().unwrap();
+    let lines: Vec<String> = (0..7).map(doc).collect();
+    let input = write(dir.path(), "in.jsonl", &lines);
+    let db = dir.path().join("db");
+    let (code, _, err) = run(&["import", "--db", db.to_str().unwrap(), input.to_str().unwrap()]);
+    assert_eq!(code, 0, "{err}");
+    let mut opts = pipeline::export::ExportOptions::new(db, PathBuf::from("-"));
+    opts.fields = vec!["id".into()];
+    opts.progress_every = 3;
+    opts.chunk_docs = 2;
+    opts.threads = 2;
+    let (mut out, mut log) = (Vec::new(), Vec::new());
+    let report = pipeline::export::export(&opts, &mut out, &mut log).unwrap();
+    assert_eq!(report.written, 7);
+    assert_eq!(String::from_utf8(log).unwrap(), "  exported 4 / 7 documents\n  exported 6 / 7 documents\n");
+    assert_eq!(out.iter().filter(|&&b| b == b'\n').count(), 7);
+}
+
+fn books_store(dir: &Path) -> String {
+    let lines = vec![
+        serde_json::json!({ "text": format!("A {PROSE}"), "source": "gut", "year": 1818, "title": "Frankenstein", "author": "Mary Shelley" }).to_string(),
+        serde_json::json!({ "text": format!("B {PROSE} {PROSE}"), "source": "gut", "year": 1900, "title": "Untitled" }).to_string(),
+        serde_json::json!({ "text": format!("C {PROSE} {PROSE} {PROSE}"), "source": "web" }).to_string(),
+        serde_json::json!({ "text": format!("D {PROSE}"), "year": "1850", "title": "Quote \"d\"", "words": 999 }).to_string(),
+    ];
+    let input = write(dir, "books.jsonl", &lines);
+    let db = dir.join("db");
+    let (code, out, err) = run(&["import", "--db", db.to_str().unwrap(), "-s", "cli", "-e", "year,title,author,words", input.to_str().unwrap()]);
+    assert_eq!(code, 0, "{err}");
+    assert!(out.contains("Indexed:               4"), "{out}");
+    db.to_str().unwrap().to_string()
+}
+
+fn read_lines(path: &Path) -> Vec<serde_json::Value> {
+    let raw = std::fs::read(path).unwrap();
+    let raw = if path.to_string_lossy().ends_with(".zst") { zstd::decode_all(&raw[..]).unwrap() } else { raw };
+    String::from_utf8(raw).unwrap().lines().map(|l| serde_json::from_str(l).unwrap()).collect()
+}
+
+#[test]
+fn export_default_layout() {
+    {
+        let dir = tempfile::tempdir().unwrap();
+        let db = books_store(dir.path());
+        let out = dir.path().join("all.jsonl");
+        let (code, report, err) = run(&["export", "--db", &db, "-o", out.to_str().unwrap(), "--verify", "-t", "3"]);
+        assert_eq!(code, 0, "{err}");
+        assert!(report.starts_with(&format!("Exported 4 documents to {}", out.display())), "{report}");
+        assert!(report.contains("Scanned 4, matched 4\n"), "{report}");
+        assert!(report.contains("Verified: 4 lines parse as JSON in 1 file"), "{report}");
+        assert!(report.contains("Skipped 1 metadata keys"), "{report}");
+        let docs = read_lines(&out);
+        assert_eq!(docs.len(), 4);
+        let frank = docs.iter().find(|d| d["title"] == "Frankenstein").unwrap();
+        assert_eq!(frank["source"], "gut");
+        assert_eq!(frank["year"], 1818);
+        assert_eq!(frank["author"], "Mary Shelley");
+        assert_eq!(frank["words"], 30);
+        assert_eq!(frank["id"].as_str().unwrap().len(), 32);
+        assert!(frank["text"].as_str().unwrap().starts_with("A The quick"));
+        assert_eq!(frank["vowel"], 100.0);
+        assert!(frank.get("dictHit").is_none());
+        let d = docs.iter().find(|d| d["title"] == "Quote \"d\"").unwrap();
+        assert_eq!(d["words"], 30, "the feature wins over the imported `words` key");
+        assert_eq!(d["year"], "1850");
+        let web = docs.iter().find(|d| d["source"] == "web").unwrap();
+        assert!(web.get("title").is_none());
+        // ids are in key order
+        let ids: Vec<&str> = docs.iter().map(|d| d["id"].as_str().unwrap()).collect();
+        let mut sorted = ids.clone();
+        sorted.sort_unstable();
+        assert_eq!(ids, sorted);
+        // refuses to overwrite, unless forced
+        let (code, _, err) = run(&["export", "--db", &db, "-o", out.to_str().unwrap()]);
+        assert_eq!(code, 2);
+        assert!(err.contains("exists; use --force"), "{err}");
+        let (code, _, _) = run(&["export", "--db", &db, "-o", out.to_str().unwrap(), "--force", "-f", "id"]);
+        assert_eq!(code, 0);
+        assert_eq!(read_lines(&out)[0].as_object().unwrap().len(), 1);
+        assert!(!dir.path().join("all.jsonl.partial").exists());
+    }
+}
+
+#[test]
+fn export_headers_fields_and_filters() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = books_store(dir.path());
+    let tpl = dir.path().join("header.txt");
+    std::fs::write(&tpl, "---\nyear = {extra.year}\ntitle = {extra.title}\nauthor = {extra.author}\n---\n").unwrap();
+    let out = dir.path().join("with-headers.jsonl");
+    let (code, report, err) = run(&[
+        "export", "--db", &db, "-o", out.to_str().unwrap(), "--header-file", tpl.to_str().unwrap(), "-f", "text,source", "source == \"gut\" || has(extra.year)",
+    ]);
+    assert_eq!(code, 0, "{err}");
+    assert!(report.contains("matched 3 (source == \"gut\" || has(extra.year))"), "{report}");
+    let docs = read_lines(&out);
+    assert_eq!(docs.len(), 3);
+    let texts: Vec<&str> = docs.iter().map(|d| d["text"].as_str().unwrap()).collect();
+    assert!(texts.iter().any(|t| t.starts_with("---\nyear = 1818\ntitle = Frankenstein\nauthor = Mary Shelley\n---\n\nA The quick")), "{texts:?}");
+    assert!(texts.iter().any(|t| t.starts_with("---\nyear = 1900\ntitle = Untitled\n---\n\nB The quick")), "{texts:?}");
+    assert!(texts.iter().any(|t| t.starts_with("---\nyear = 1850\ntitle = Quote \"d\"\n---\n\nD The quick")), "{texts:?}");
+    assert!(docs.iter().all(|d| d.as_object().unwrap().len() == 2));
+
+    // inline template with escapes, custom separator, one-line header, no match for the web doc
+    let out2 = dir.path().join("inline.jsonl");
+    let (code, _, err) = run(&[
+        "export", "--db", &db, "-o", out2.to_str().unwrap(), "--header", "Title: {extra.title}\\nWords: {words}", "--header-sep", "\\n", "-f", "text,extra.title,words",
+    ]);
+    assert_eq!(code, 0, "{err}");
+    let docs = read_lines(&out2);
+    let web = docs.iter().find(|d| d.get("title").is_none()).unwrap();
+    assert!(web["text"].as_str().unwrap().starts_with("Words: 88\nC The quick"), "a line with a null placeholder is dropped");
+    let frank = docs.iter().find(|d| d["title"] == "Frankenstein").unwrap();
+    assert!(frank["text"].as_str().unwrap().starts_with("Title: Frankenstein\nWords: 30\nA The quick"));
+    assert_eq!(frank["words"], 30);
+
+    // sample, top, limit and stdout
+    let (code, stdout, stderr) = run(&["export", "--db", &db, "-o", "-", "--top", "2", "-f", "id,words"]);
+    assert_eq!(code, 0, "{stderr}");
+    let docs: Vec<serde_json::Value> = stdout.lines().map(|l| serde_json::from_str(l).unwrap()).collect();
+    assert_eq!(docs.iter().map(|d| d["words"].as_u64().unwrap()).collect::<Vec<_>>(), vec![88, 59], "best first");
+    assert!(stderr.starts_with("Exported 2 documents to stdout"), "{stderr}");
+    assert!(stderr.contains("selected 2 (top 2)"), "{stderr}");
+    let (code, stdout, _) = run(&["export", "--db", &db, "-o", "-", "--limit", "3", "-f", "id"]);
+    assert_eq!(code, 0);
+    assert_eq!(stdout.lines().count(), 3);
+    let (code, stdout, _) = run(&["export", "--db", &db, "-o", "-", "--top", "3", "--limit", "1", "-f", "words"]);
+    assert_eq!(code, 0);
+    assert_eq!(stdout, "{\"words\":88}\n");
+    let (code, a, _) = run(&["export", "--db", &db, "-o", "-", "--sample", "0.5", "--seed", "3", "-f", "id"]);
+    assert_eq!(code, 0);
+    let (_, b, _) = run(&["export", "--db", &db, "-o", "-", "--sample", "0.5", "--seed", "3", "-f", "id"]);
+    assert_eq!(a, b, "sampling is reproducible");
+    let (_, all, _) = run(&["export", "--db", &db, "-o", "-", "--sample", "1", "-f", "id"]);
+    assert_eq!(all.lines().count(), 4);
+    let (code, stdout, stderr) = run(&["export", "--db", &db, "-o", "-", "-f", "id", "words > 100000"]);
+    assert_eq!(code, 0, "{stderr}");
+    assert_eq!(stdout, "");
+    assert!(stderr.starts_with("Exported 0 documents"), "{stderr}");
+}
+
+#[test]
+fn export_shards_and_zstd() {
+    let dir = tempfile::tempdir().unwrap();
+    let lines: Vec<String> = (0..25).map(doc).collect();
+    let input = write(dir.path(), "in.jsonl", &lines);
+    let db = dir.path().join("db");
+    let (code, _, err) = run(&["import", "--db", db.to_str().unwrap(), input.to_str().unwrap()]);
+    assert_eq!(code, 0, "{err}");
+    let db = db.to_str().unwrap();
+    let out = dir.path().join("shards").join("v.jsonl");
+    let (code, report, err) = run(&["export", "--db", db, "-o", out.to_str().unwrap(), "--shard", "10", "--zstd", "--verify", "-f", "id"]);
+    assert_eq!(code, 0, "{err}");
+    assert!(report.starts_with("Exported 25 documents to 3 files"), "{report}");
+    assert!(report.contains("v-0001.jsonl.zst  10 docs"), "{report}");
+    assert!(report.contains("v-0003.jsonl.zst  5 docs"), "{report}");
+    assert!(report.contains("Verified: 25 lines parse as JSON in 3 files"), "{report}");
+    let mut all = Vec::new();
+    for n in 1..=3 {
+        let p = dir.path().join("shards").join(format!("v-{n:04}.jsonl.zst"));
+        all.extend(read_lines(&p));
+    }
+    assert_eq!(all.len(), 25);
+    // a .zst output name turns compression on by itself; an empty match still produces a complete file
+    let out = dir.path().join("none.jsonl.zst");
+    let (code, report, err) = run(&["export", "--db", db, "-o", out.to_str().unwrap(), "words > 1000"]);
+    assert_eq!(code, 0, "{err}");
+    assert!(report.starts_with(&format!("Exported 0 documents to {}", out.display())), "{report}");
+    assert!(read_lines(&out).is_empty());
+    assert!(!dir.path().join("none.jsonl.zst.partial").exists());
+}
+
+#[test]
+fn export_usage_errors() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = books_store(dir.path());
+    let out = dir.path().join("x.jsonl");
+    let o = out.to_str().unwrap();
+    let usage = |args: &[&str]| {
+        let (code, _, err) = run(&[&["export", "--db", &db][..], args].concat());
+        assert_eq!(code, 2, "{err}");
+        err
+    };
+    assert!(usage(&["-o", o, "-f", "nope"]).contains("unknown field \"nope\""));
+    assert!(usage(&["-o", o, "--header", "{bogus}"]).contains("placeholder {bogus}"));
+    assert!(usage(&["-o", o, "--header-file", dir.path().join("missing").to_str().unwrap()]).contains("--header-file"));
+    assert!(usage(&["-o", o, "--sample", "2"]).contains("--sample"));
+    assert!(usage(&["-o", "-", "--shard", "5"]).contains("--shard cannot"));
+    assert!(usage(&["-o", o, "words >"]).contains("expression"));
+    assert!(usage(&["-o", o, "--zstd-level", "99"]).contains("--zstd-level"));
+    let (code, _, err) = run(&["export", "--db", dir.path().join("nostore").to_str().unwrap(), "-o", o]);
+    assert_eq!(code, 2, "{err}");
+    assert!(!out.exists());
+}
+
+#[test]
+fn info_show_compact_and_check() {
+    {
+        let dir = tempfile::tempdir().unwrap();
+        let db = books_store(dir.path());
+
+        let (code, out, err) = run(&["info", "--db", &db]);
+        assert_eq!(code, 0, "{err}");
+        assert!(out.starts_with(&format!("Store:      {db}\nDocuments:  about ")), "{out}");
+        assert!(out.contains("Disk:       ") && out.contains("Sources:    3 (") && out.contains("gut") && out.contains("web") && out.contains("cli"), "{out}");
+        assert!(out.contains("Features:   len, bytes, words, uniqWords, sentences, uniqChars, vowel, alpha, entropy, compress, dictHit (schema 1)\n"), "{out}");
+        assert!(out.contains("\nmeta:       ") && out.contains("\ntext:       "), "{out}");
+
+        let (_, ids, _) = run(&["export", "--db", &db, "-o", "-", "-f", "id", "--limit", "1"]);
+        let id: serde_json::Value = serde_json::from_str(ids.trim()).unwrap();
+        let id = id["id"].as_str().unwrap().to_string();
+        let (code, out, err) = run(&["show", "--db", &db, &id]);
+        assert_eq!(code, 0, "{err}");
+        assert!(out.starts_with(&format!("id:        {id}\nsource:    ")), "{out}");
+        assert!(out.contains("\nfeatures:  len ") && out.contains("  vowel ") && out.contains("  alpha ") && out.contains("\n--- text ("), "{out}");
+        assert!(out.contains("The quick brown fox"), "{out}");
+        let (code, out, _) = run(&["show", "--db", &db, &id[..16], "--head", "5"]);
+        assert_eq!(code, 0);
+        assert!(out.contains("--- text (") && out.contains("\n... [") && out.contains(" more chars]\n"), "{out}");
+        let (code, out, _) = run(&["show", "--db", &db, "--json", &id, &id]);
+        assert_eq!(code, 0);
+        let lines: Vec<serde_json::Value> = out.lines().map(|l| serde_json::from_str(l).unwrap()).collect();
+        assert_eq!(lines.len(), 2);
+        assert_eq!(lines[0]["id"], id);
+        assert!(lines[0]["text"].as_str().unwrap().contains("quick"));
+        let (code, out, _) = run(&["show", "--db", &db, &id, &id]);
+        assert_eq!(code, 0);
+        assert_eq!(out.matches("\nid:        ").count(), 1, "two documents are separated by a blank line: {out}");
+        let (code, _, err) = run(&["show", "--db", &db, "ffff"]);
+        assert_eq!(code, 2, "{err}");
+        assert!(err.contains("no document starts with it"), "{err}");
+
+        let (code, out, err) = run(&["check", "--db", &db, "-t", "2"]);
+        assert_eq!(code, 0, "{err}");
+        assert!(out.starts_with("Check: OK, 4 documents (structure only"), "{out}");
+        assert!(out.contains("Keyspaces: meta 4, text 4, extra 3; 3 source labels\n"), "{out}");
+        let (code, out, err) = run(&["check", "--db", &db, "--deep"]);
+        assert_eq!(code, 0, "{err}");
+        assert!(out.starts_with("Check: OK, 4 documents (deep check"), "{out}");
+        assert!(out.contains("stale features:                    0\n"), "{out}");
+
+        let (code, out, err) = run(&["compact", "--db", &db]);
+        assert_eq!(code, 0, "{err}");
+        assert!(out.starts_with("Compacted store: ") && out.contains(" MB -> ") && out.contains(" MB in "), "{out}");
+        let (_, out, _) = run(&["count", "--db", &db]);
+        assert_eq!(out, "4 / 4 documents match (100.000%).\n");
+
+        // damage the store through the library, then check must fail
+        {
+            let store = store::open(Path::new(&db), false).unwrap();
+            store.put_raw(store::Keyspace::Text, &[0xee; 16], Some(b"orphan")).unwrap();
+            store.put_raw(store::Keyspace::Meta, &[0xef; 16], Some(&pipeline::meta::Meta::default().encode())).unwrap();
+            store.persist().unwrap();
+        }
+        let (code, out, err) = run(&["check", "--db", &db, "--examples", "1"]);
+        assert_eq!(code, 1, "{err}");
+        assert!(out.starts_with("Check: 2 problems in 5 documents"), "{out}");
+        assert!(out.contains("missing text:                      1  e.g. efefefefefefefefefefefefefefefef\n"), "{out}");
+        assert!(out.contains("orphan text:                       1  e.g. eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee\n"), "{out}");
+        assert_eq!(err, "Error: store error: check found 2 problems\n");
+        let (code, _, err) = run(&["show", "--db", &db, &pipeline::hash::key_to_hex(&[0xef; 16])]);
+        assert_eq!(code, 1, "{err}");
+        assert!(err.contains("text missing"), "{err}");
+    }
+    let (code, _, err) = run(&["info", "--db", "/nonexistent/store"]);
+    assert_eq!(code, 2, "{err}");
+}
+
+#[test]
+fn replacement_drops_stale_extra() {
+    {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("db");
+        let with_year = serde_json::json!({ "text": format!("X {PROSE}"), "year": 1800 }).to_string();
+        let input = write(dir.path(), "in.jsonl", &[with_year, doc(1)]);
+        let (code, _, err) = run(&["import", "--db", db.to_str().unwrap(), "-e", "year", input.to_str().unwrap()]);
+        assert_eq!(code, 0, "{err}");
+        let db = db.to_str().unwrap();
+        let (_, out, _) = run(&["count", "--db", db, "has(extra.year)"]);
+        assert_eq!(out, "1 / 2 documents match (50.000%).\n");
+        // A replacement without metadata, written the way the import writer writes one.
+        let rows = dump(Path::new(db));
+        {
+            let store = store::open(Path::new(db), false).unwrap();
+            let row = rows.iter().find(|r| r.3.is_some()).unwrap();
+            let key = pipeline::hash::key_from_hex(&row.0).unwrap();
+            store.put_batch(&[store::Record { key, meta: row.1.clone(), text: row.2.clone(), extra: None, replace: true }]).unwrap();
+            store.persist().unwrap();
+        }
+        let (_, out, _) = run(&["count", "--db", db, "has(extra.year)"]);
+        assert_eq!(out, "0 / 2 documents match (0.000%).\n");
+        // the meta still carries has_extra: exactly the inconsistency `check` exists for
+        let (code, out, err) = run(&["check", "--db", db]);
+        assert_eq!(code, 1, "{err}");
+        assert!(out.contains("missing extra:                     1"), "{out}");
+    }
 }

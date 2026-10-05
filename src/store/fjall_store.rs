@@ -1,4 +1,4 @@
-//! fjall backend: pure-Rust LSM tree with key-value separation for `text`.
+//! The fjall engine: pure-Rust LSM tree with key-value separation for `text`.
 
 use std::path::Path;
 
@@ -8,7 +8,8 @@ use fjall::{CompressionType, Database, Keyspace, KeyspaceCreateOptions, KvSepara
 use crate::error::{Error, Result};
 use crate::hash::Key;
 
-use super::{Backend, Record, ScanFn, Store};
+use super::{Keyspace as Ks, KvIter, Record, ScanFn, Store};
+use crate::util::{fmt_int, fmt_mb};
 
 pub struct FjallStore {
     db: Database,
@@ -50,6 +51,21 @@ impl FjallStore {
     fn get(ks: &Keyspace, key: &Key) -> Result<Option<Vec<u8>>> {
         Ok(ks.get(key.as_slice()).map_err(Error::store)?.map(|v| v.to_vec()))
     }
+
+    fn space(&self, ks: Ks) -> &Keyspace {
+        match ks {
+            Ks::Meta => &self.meta,
+            Ks::Text => &self.text,
+            Ks::Extra => &self.extra,
+        }
+    }
+
+    fn range(ks: &Keyspace, lo: &Key, hi: Option<&Key>) -> fjall::Iter {
+        match hi {
+            Some(hi) => ks.range(lo.to_vec()..hi.to_vec()),
+            None => ks.range(lo.to_vec()..),
+        }
+    }
 }
 
 fn to_key(bytes: &[u8]) -> Result<Key> {
@@ -57,10 +73,6 @@ fn to_key(bytes: &[u8]) -> Result<Key> {
 }
 
 impl Store for FjallStore {
-    fn backend(&self) -> Backend {
-        Backend::Fjall
-    }
-
     fn put_batch(&self, records: &[Record]) -> Result<()> {
         if records.is_empty() {
             return Ok(());
@@ -71,7 +83,8 @@ impl Store for FjallStore {
             batch.insert(&self.text, r.key.as_slice(), r.text.as_slice());
             match &r.extra {
                 Some(e) => batch.insert(&self.extra, r.key.as_slice(), e.as_slice()),
-                None => batch.remove(&self.extra, r.key.as_slice()),
+                None if r.replace => batch.remove(&self.extra, r.key.as_slice()),
+                None => {}
             }
         }
         batch.commit().map_err(Error::store)
@@ -90,11 +103,7 @@ impl Store for FjallStore {
     }
 
     fn scan_meta(&self, lo: &Key, hi: Option<&Key>, f: &mut ScanFn<'_>) -> Result<()> {
-        let iter: fjall::Iter = match hi {
-            Some(hi) => self.meta.range(lo.as_slice()..hi.as_slice()),
-            None => self.meta.range(lo.as_slice()..),
-        };
-        for guard in iter {
+        for guard in Self::range(&self.meta, lo, hi) {
             let (k, v) = guard.into_inner().map_err(Error::store)?;
             let key = to_key(&k)?;
             if !f(&key, &v)? {
@@ -102,6 +111,55 @@ impl Store for FjallStore {
             }
         }
         Ok(())
+    }
+
+    fn iter<'a>(&'a self, ks: Ks, lo: &Key, hi: Option<&Key>, values: bool) -> Result<KvIter<'a>> {
+        let it = Self::range(self.space(ks), lo, hi);
+        Ok(Box::new(it.map(move |guard| {
+            if values {
+                let (k, v) = guard.into_inner().map_err(Error::store)?;
+                Ok((to_key(&k)?, v.to_vec()))
+            } else {
+                // `key()` never touches a separated blob
+                let k = guard.key().map_err(Error::store)?;
+                Ok((to_key(&k)?, Vec::new()))
+            }
+        })))
+    }
+
+    fn put_raw(&self, ks: Ks, key: &Key, value: Option<&[u8]>) -> Result<()> {
+        let space = self.space(ks);
+        match value {
+            Some(v) => space.insert(key.as_slice(), v).map_err(Error::store),
+            None => space.remove(key.as_slice()).map_err(Error::store),
+        }
+    }
+
+    fn compact(&self) -> Result<()> {
+        for ks in [&self.meta, &self.text, &self.extra, &self.sources] {
+            ks.rotate_memtable_and_wait().map_err(Error::store)?;
+            ks.major_compact().map_err(Error::store)?;
+        }
+        Ok(())
+    }
+
+    fn details(&self) -> Result<Vec<(String, String)>> {
+        let mut out = Vec::new();
+        for (name, ks) in [("meta", &self.meta), ("text", &self.text), ("extra", &self.extra)] {
+            let mut v = format!(
+                "{}, about {} keys, {} tables ({} at L0)",
+                fmt_mb(ks.disk_space()),
+                fmt_int(ks.approximate_len() as u64),
+                ks.table_count(),
+                ks.l0_table_count()
+            );
+            if ks.is_kv_separated() {
+                v.push_str(&format!(", {} blob files ({} fragmented)", ks.blob_file_count(), fmt_mb(ks.fragmented_blob_bytes())));
+            }
+            out.push((name.to_string(), v));
+        }
+        out.push(("cache".to_string(), format!("{} used of {}", fmt_mb(self.db.cache_size()), fmt_mb(self.db.cache_capacity()))));
+        Ok(out)
     }
 
     fn sources(&self) -> Result<Vec<(u16, String)>> {
@@ -144,7 +202,6 @@ mod tests {
     fn contract() {
         let dir = tempfile::tempdir().unwrap();
         let store = FjallStore::open(dir.path()).unwrap();
-        assert_eq!(store.backend(), Backend::Fjall);
         super::super::tests::exercise(&store);
     }
 

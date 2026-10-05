@@ -21,7 +21,7 @@ use crate::hash::{Key, doc_key, raw_hash};
 use crate::jsonl::reader::window;
 use crate::jsonl::{Chunk, Chunker, open_input};
 use crate::meta::Meta;
-use crate::store::{self, Backend, Record, Sources, Store};
+use crate::store::{self, Record, Sources, Store};
 use crate::util::{fmt_int, fmt_num, fmt_rate};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
@@ -35,7 +35,6 @@ pub enum OnError {
 #[derive(Debug, Clone)]
 pub struct ImportOptions {
     pub db: PathBuf,
-    pub backend: Option<Backend>,
     pub source: String,
     pub source_key: String,
     pub text_key: String,
@@ -58,7 +57,6 @@ impl ImportOptions {
     pub fn new(db: PathBuf, inputs: Vec<PathBuf>) -> Self {
         Self {
             db,
-            backend: None,
             source: "cli".into(),
             source_key: "source".into(),
             text_key: "text".into(),
@@ -139,9 +137,14 @@ pub struct ImportReport {
     pub elapsed: Duration,
     pub stopped_at_limit: bool,
     pub dry_run: bool,
-    pub backend: Option<Backend>,
+    /// False for a dry run, which never opens a store.
+    pub has_store: bool,
     pub approx_docs: u64,
     pub disk_size: u64,
+    /// Peak resident memory of the process, bytes.
+    pub peak_rss: u64,
+    /// Resident memory at the end, split (anonymous, file-backed).
+    pub rss_split: Option<(u64, u64)>,
 }
 
 impl ImportReport {
@@ -181,13 +184,21 @@ impl ImportReport {
             fmt_rate(self.bytes, secs),
             fmt_num(if secs > 0.0 { docs as f64 / secs } else { 0.0 }, 0)
         ));
-        if let Some(b) = self.backend {
+        if self.has_store {
             s.push_str(&format!(
-                "Store: {} backend, about {} documents, {} MB on disk\n",
-                b.as_str(),
+                "Store: about {} documents, {} MB on disk\n",
                 fmt_int(self.approx_docs),
                 fmt_num(self.disk_size as f64 / 1e6, 1)
             ));
+        }
+        match self.rss_split {
+            Some((anon, file)) => s.push_str(&format!(
+                "Peak RSS: {} MB (at the end: {} MB heap, {} MB mapped files)\n",
+                fmt_num(self.peak_rss as f64 / 1e6, 1),
+                fmt_num(anon as f64 / 1e6, 1),
+                fmt_num(file as f64 / 1e6, 1)
+            )),
+            None => s.push_str(&format!("Peak RSS: {} MB\n", fmt_num(self.peak_rss as f64 / 1e6, 1))),
         }
         if self.stopped_at_limit {
             s.push_str("Stopped at --limit.\n");
@@ -376,7 +387,7 @@ impl Writer<'_> {
         let label = doc.source.as_deref().unwrap_or(&self.opts.source);
         let sid = self.sources.intern(label, self.store)?;
         let meta = doc.features.to_meta(sid, doc.extra.is_some());
-        let record = Record { key: doc.key, meta: meta.encode(), text: doc.text.into_bytes(), extra: doc.extra.map(String::into_bytes) };
+        let mut record = Record { key: doc.key, meta: meta.encode(), text: doc.text.into_bytes(), extra: doc.extra.map(String::into_bytes), replace: false };
         let k8 = u64::from_le_bytes(record.key[..8].try_into().expect("8 bytes"));
         let counts = &mut self.counts[file];
         if self.seen.insert(k8) {
@@ -386,6 +397,8 @@ impl Writer<'_> {
         } else if let Some(&i) = self.pending.get(&record.key) {
             let old_meta = Meta::decode(&self.batch[i].meta)?;
             if new_wins(&old_meta, &self.batch[i].text, &meta, &record.text) {
+                // inherit whether the slot overwrites a stored document
+                record.replace = self.batch[i].replace;
                 self.batch[i] = record;
                 counts.replaced += 1;
             } else {
@@ -395,6 +408,7 @@ impl Writer<'_> {
             let old_meta = Meta::decode(&old_bytes)?;
             let old_text = self.store.get_text(&record.key)?.unwrap_or_default();
             if new_wins(&old_meta, &old_text, &meta, &record.text) {
+                record.replace = true;
                 self.pending.insert(record.key, self.batch.len());
                 self.batch.push(record);
                 counts.replaced += 1;
@@ -512,7 +526,7 @@ pub fn import(opts: &ImportOptions, log: &mut dyn Write) -> Result<ImportReport>
                 }
             }
         }
-        store::open(&opts.db, opts.backend, true)?
+        store::open(&opts.db, true)?
     };
 
     let mut seen: HashSet<u64, IdentityBuild> = HashSet::with_hasher(IdentityBuild);
@@ -607,9 +621,11 @@ pub fn import(opts: &ImportOptions, log: &mut dyn Write) -> Result<ImportReport>
         bytes: writer.bytes,
         stopped_at_limit: hit_limit,
         dry_run: opts.dry_run,
-        backend: if opts.dry_run { None } else { Some(store.backend()) },
+        has_store: !opts.dry_run,
         approx_docs: store.approx_count()?,
         disk_size: store.disk_size()?,
+        peak_rss: crate::util::peak_rss_bytes(),
+        rss_split: crate::util::rss_breakdown(),
         ..Default::default()
     };
     for (i, path) in opts.inputs.iter().enumerate() {
@@ -759,10 +775,12 @@ mod tests {
         w.seen.insert(u64::from_le_bytes(d.key[..8].try_into().unwrap()));
         w.add_doc(0, d).unwrap();
         assert_eq!(w.counts[0].indexed, 1);
+        assert!(!w.batch[0].replace, "a fresh document never writes an extra tombstone");
         // Same key, higher score, still in the pending batch: replaced in place.
         w.add_doc(0, mk(&more, &mut sc)).unwrap();
         assert_eq!((w.counts[0].replaced, w.batch.len()), (1, 1));
         assert!(String::from_utf8(w.batch[0].text.clone()).unwrap().contains("quick brown ends"));
+        assert!(!w.batch[0].replace, "an in-batch replacement of a fresh document is still fresh");
         // Lower score again: kept as a duplicate.
         w.add_doc(0, mk(&fewer, &mut sc)).unwrap();
         assert_eq!(w.counts[0].duplicates, 1);
@@ -772,7 +790,7 @@ mod tests {
 
     #[test]
     fn report_renders_every_section() {
-        let mut rep = ImportReport { elapsed: Duration::from_secs(2), bytes: 4_000_000, stopped_at_limit: true, backend: Some(Backend::Fjall), ..Default::default() };
+        let mut rep = ImportReport { elapsed: Duration::from_secs(2), bytes: 4_000_000, stopped_at_limit: true, has_store: true, ..Default::default() };
         let mut counts = Counts { lines: 5, skipped: 1, empty: 1, indexed: 2, ..Default::default() };
         counts.dropped[DropReason::BadJson.index()] = 1;
         rep.totals.add(&counts);
@@ -782,7 +800,7 @@ mod tests {
         assert!(s.contains("bad_json 1"));
         assert!(s.contains("2.0 MB/s"));
         assert!(s.contains("Stopped at --limit"));
-        assert!(s.contains("fjall backend"));
+        assert!(s.contains("Store: about 0 documents"));
         let empty = ImportReport::default().render();
         assert!(empty.contains("Totals: 0 lines"));
         let none = ImportReport { files: vec![FileReport::default()], dry_run: true, ..Default::default() }.render();

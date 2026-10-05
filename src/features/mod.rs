@@ -4,6 +4,7 @@
 //! soon as a prefilter rule fails so junk never reaches the expensive passes.
 
 pub mod chars;
+pub mod compress;
 pub mod sentences;
 pub mod words;
 
@@ -63,9 +64,10 @@ impl DropReason {
 /// Everything a worker reuses between documents.
 #[derive(Default)]
 pub struct Scratch {
-    pub chars: chars::CharSet,
+    pub chars: chars::CharFreq,
     pub words: words::WordScratch,
     pub norm: Vec<u8>,
+    pub lz4: Vec<u8>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -78,6 +80,10 @@ pub struct Features {
     pub uniq_chars: u32,
     pub alpha_words: u32,
     pub vowel_words: u32,
+    /// Hundredths of a bit per character.
+    pub entropy: u16,
+    /// LZ4 size over raw size, basis points.
+    pub compress: u16,
 }
 
 /// Basis points of `num / den`, rounded; 0 when `den` is 0.
@@ -104,6 +110,8 @@ impl Features {
             alpha: basis_points(self.alpha_words, self.words),
             flags: if has_extra { FLAG_HAS_EXTRA } else { 0 },
             dict_hit: None,
+            entropy: Some(self.entropy),
+            compress: Some(self.compress),
         }
     }
 }
@@ -124,7 +132,8 @@ pub fn compute(text: &str, max_len: u32, scratch: &mut Scratch) -> Result<Featur
     if len > max_len {
         return Err(DropReason::TooLong);
     }
-    let uniq_chars = chars::uniq_chars(text, &mut scratch.chars);
+    let cs = chars::char_stats(text, &mut scratch.chars);
+    let uniq_chars = cs.uniq;
     if uniq_chars <= MIN_UNIQ_CHARS || uniq_chars > MAX_UNIQ_CHARS {
         return Err(DropReason::UniqChars);
     }
@@ -133,6 +142,7 @@ pub fn compute(text: &str, max_len: u32, scratch: &mut Scratch) -> Result<Featur
         return Err(DropReason::FewWords);
     }
     let sentences = sentences::count_sentences(text);
+    let compress = compress::compress_ratio(text.as_bytes(), &mut scratch.lz4);
     Ok(Features {
         len,
         bytes: bytes as u32,
@@ -142,6 +152,8 @@ pub fn compute(text: &str, max_len: u32, scratch: &mut Scratch) -> Result<Featur
         uniq_chars,
         alpha_words: w.alpha_words,
         vowel_words: w.vowel_words,
+        entropy: cs.entropy,
+        compress,
     })
 }
 

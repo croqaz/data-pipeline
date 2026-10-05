@@ -44,7 +44,7 @@ fn scan_range<A>(
     lo: &Key,
     hi: Option<&Key>,
     acc: &mut A,
-    step: &(impl Fn(&mut A, &Key, &Meta) + Sync),
+    step: &(impl Fn(&mut A, &Key, &Meta) -> bool + Sync),
 ) -> Result<(u64, u64)> {
     let mut scanned = 0u64;
     let mut matched = 0u64;
@@ -66,7 +66,9 @@ fn scan_range<A>(
         };
         if keep {
             matched += 1;
-            step(acc, key, &meta);
+            if !step(acc, key, &meta) {
+                return Ok(false);
+            }
         }
         Ok(cfg.limit.is_none_or(|l| scanned < l))
     })?;
@@ -74,13 +76,14 @@ fn scan_range<A>(
 }
 
 /// Scan every record, in parallel key ranges, feeding matched records to
-/// `step`. Returns (scanned, matched, one accumulator per thread).
+/// `step`, which returns `false` to stop its range early. Returns (scanned,
+/// matched, one accumulator per thread, in key order).
 pub fn scan<A: Send>(
     store: &dyn Store,
     sources: &Sources,
     cfg: &ScanConfig<'_>,
     init: impl Fn() -> A + Sync,
-    step: impl Fn(&mut A, &Key, &Meta) + Sync,
+    step: impl Fn(&mut A, &Key, &Meta) -> bool + Sync,
 ) -> Result<(u64, u64, Vec<A>)> {
     let threads = if cfg.limit.is_some() { 1 } else { cfg.threads.clamp(1, 256) };
     let step = &step;
@@ -190,7 +193,10 @@ pub struct StatsReport {
 }
 
 pub fn collect(store: &dyn Store, sources: &Sources, cfg: &ScanConfig<'_>) -> Result<StatsReport> {
-    let (scanned, matched, accs) = scan(store, sources, cfg, StatsAcc::new, |acc, _, meta| acc.add(meta))?;
+    let (scanned, matched, accs) = scan(store, sources, cfg, StatsAcc::new, |acc, _, meta| {
+        acc.add(meta);
+        true
+    })?;
     let mut acc = StatsAcc::new();
     for a in &accs {
         acc.merge(a);

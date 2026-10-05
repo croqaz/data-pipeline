@@ -21,7 +21,7 @@ impl CountReport {
 }
 
 pub fn count(store: &dyn Store, sources: &Sources, cfg: &ScanConfig<'_>) -> Result<CountReport> {
-    let (scanned, matched, _) = scan(store, sources, cfg, || (), |(), _, _| {})?;
+    let (scanned, matched, _) = scan(store, sources, cfg, || (), |(), _, _| true)?;
     Ok(CountReport { scanned, matched })
 }
 

@@ -8,7 +8,9 @@ the Rust code. Run it once; the Rust test `golden` compares against the
 output byte for byte.
 """
 import json
+import math
 import re
+from collections import Counter
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
@@ -131,6 +133,17 @@ def basis_points(num, den):
     return min(10_000, (num * 10_000 + den // 2) // den)
 
 
+def char_entropy(text):
+    """Order-0 Shannon entropy in hundredths of a bit per character, summed
+    over the counts in ascending order (the Rust code sums the same way)."""
+    counts = sorted(Counter(text).values())
+    n = sum(counts)
+    if n == 0:
+        return 0
+    h = math.log2(n) - sum(c * math.log2(c) for c in counts) / n
+    return min(65_535, round(max(h, 0.0) * 100))
+
+
 def compute(text, max_len=MAX_LEN):
     nbytes = len(text.encode("utf-8"))
     if nbytes <= MIN_LEN:
@@ -157,6 +170,9 @@ def compute(text, max_len=MAX_LEN):
         "uniqChars": uniq,
         "vowel": basis_points(vowel, alpha),
         "alpha": basis_points(alpha, words),
+        # `compress` (LZ4 ratio) is not here: no independent LZ4 is installed,
+        # so src/features/compress.rs checks it against known inputs instead.
+        "entropy": char_entropy(text),
     }
 
 

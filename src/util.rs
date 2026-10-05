@@ -36,6 +36,41 @@ pub fn fmt_num(x: f64, decimals: usize) -> String {
     }
 }
 
+/// Peak resident set size of this process, in bytes (Linux `ru_maxrss`).
+pub fn peak_rss_bytes() -> u64 {
+    let mut usage: libc::rusage = unsafe { std::mem::zeroed() };
+    // SAFETY: getrusage writes into the struct we own and returns 0 on success.
+    let rc = unsafe { libc::getrusage(libc::RUSAGE_SELF, &mut usage) };
+    if rc == 0 { (usage.ru_maxrss as u64) * 1024 } else { 0 }
+}
+
+/// Current resident memory split into anonymous (heap, the part that can
+/// be out-of-memory killed) and file-backed (mapped files, reclaimable
+/// cache), from `/proc/self/status`. `None` off Linux.
+pub fn rss_breakdown() -> Option<(u64, u64)> {
+    let status = std::fs::read_to_string("/proc/self/status").ok()?;
+    parse_rss(&status)
+}
+
+fn parse_rss(status: &str) -> Option<(u64, u64)> {
+    let mut anon = None;
+    let mut file = None;
+    for line in status.lines() {
+        let kb = |l: &str| l.split_whitespace().next().and_then(|v| v.parse::<u64>().ok()).map(|v| v * 1024);
+        if let Some(rest) = line.strip_prefix("RssAnon:") {
+            anon = kb(rest.trim_start());
+        } else if let Some(rest) = line.strip_prefix("RssFile:") {
+            file = kb(rest.trim_start());
+        }
+    }
+    Some((anon?, file?))
+}
+
+/// Bytes as megabytes with one decimal: `2_500_000` -> `"2.5 MB"`.
+pub fn fmt_mb(bytes: u64) -> String {
+    format!("{} MB", fmt_num(bytes as f64 / 1_000_000.0, 1))
+}
+
 /// Bytes per second as a human-readable rate.
 pub fn fmt_rate(bytes: u64, secs: f64) -> String {
     if secs <= 0.0 {
@@ -90,6 +125,17 @@ pub fn dir_size(dir: &Path) -> std::io::Result<u64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn peak_rss_is_plausible() {
+        let rss = peak_rss_bytes();
+        assert!(rss > 1 << 20 && rss < 1 << 40, "{rss}");
+        let (anon, file) = rss_breakdown().unwrap();
+        assert!(anon > 0 && file > 0 && anon + file <= rss + (64 << 20), "{anon} {file} {rss}");
+        assert_eq!(parse_rss("RssAnon:\t  1024 kB\nRssFile:\t     2 kB\n"), Some((1 << 20, 2048)));
+        assert_eq!(parse_rss("RssAnon:\t 1 kB\n"), None);
+        assert_eq!(parse_rss("garbage"), None);
+    }
 
     #[test]
     fn ints_get_commas() {

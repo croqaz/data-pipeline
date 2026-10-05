@@ -46,6 +46,13 @@ pub struct Meta {
     /// Phase 2: dictionary hit rate in basis points. Reserved, not computed yet.
     #[n(11)]
     pub dict_hit: Option<u16>,
+    /// Order-0 Shannon entropy of the characters, hundredths of a bit.
+    /// `None` in records written before the feature existed.
+    #[n(12)]
+    pub entropy: Option<u16>,
+    /// LZ4 compressed size over raw size, basis points. `None` as above.
+    #[n(13)]
+    pub compress: Option<u16>,
 }
 
 impl Meta {
@@ -74,6 +81,8 @@ pub enum Kind {
     Int,
     /// Stored as basis points, shown as a percent with two decimals.
     Pct,
+    /// Stored in hundredths, shown with two decimals (bits per character).
+    Bits,
 }
 
 pub struct FeatureDef {
@@ -91,7 +100,7 @@ impl FeatureDef {
     pub fn decimals(&self) -> usize {
         match self.kind {
             Kind::Int => 0,
-            Kind::Pct => 2,
+            Kind::Pct | Kind::Bits => 2,
         }
     }
 
@@ -99,7 +108,7 @@ impl FeatureDef {
     pub fn present(&self, raw: f64) -> f64 {
         match self.kind {
             Kind::Int => raw,
-            Kind::Pct => raw / 100.0,
+            Kind::Pct | Kind::Bits => raw / 100.0,
         }
     }
 }
@@ -138,6 +147,18 @@ pub const FEATURES: &[FeatureDef] = &[
     pct_feature!("vowel", vowel),
     pct_feature!("alpha", alpha),
     FeatureDef {
+        name: "entropy",
+        kind: Kind::Bits,
+        get: |m| m.entropy.map(|v| f64::from(v) / 100.0),
+        raw: |m| m.entropy.map(u64::from),
+    },
+    FeatureDef {
+        name: "compress",
+        kind: Kind::Pct,
+        get: |m| m.compress.map(|v| f64::from(v) / 100.0),
+        raw: |m| m.compress.map(u64::from),
+    },
+    FeatureDef {
         name: "dictHit",
         kind: Kind::Pct,
         get: |m| m.dict_hit.map(|v| f64::from(v) / 100.0),
@@ -171,6 +192,8 @@ mod tests {
             alpha: 9800,
             flags: FLAG_HAS_EXTRA,
             dict_hit: None,
+            entropy: Some(431),
+            compress: Some(6020),
         }
     }
 
@@ -178,7 +201,7 @@ mod tests {
     fn cbor_round_trip_is_compact() {
         let m = sample();
         let bytes = m.encode();
-        assert!(bytes.len() < 40, "meta is {} bytes", bytes.len());
+        assert!(bytes.len() < 48, "meta is {} bytes", bytes.len());
         assert_eq!(Meta::decode(&bytes).unwrap(), m);
         assert_eq!(m.clone(), m);
         assert!(m.has_extra());
@@ -191,8 +214,14 @@ mod tests {
         m.dict_hit = Some(8800);
         let decoded = Meta::decode(&m.encode()).unwrap();
         assert_eq!(decoded.dict_hit, Some(8800));
-        assert_eq!((FEATURES[8].get)(&decoded), Some(88.0));
-        assert_eq!((FEATURES[8].raw)(&decoded), Some(8800));
+        let dict = feature_index("dictHit").unwrap();
+        assert_eq!((FEATURES[dict].get)(&decoded), Some(88.0));
+        assert_eq!((FEATURES[dict].raw)(&decoded), Some(8800));
+        let old = Meta { entropy: None, compress: None, ..sample() };
+        let decoded = Meta::decode(&old.encode()).unwrap();
+        assert_eq!((FEATURES[feature_index("entropy").unwrap()].get)(&decoded), None);
+        assert_eq!((FEATURES[feature_index("compress").unwrap()].get)(&sample()), Some(60.2));
+        assert_eq!(FEATURES[feature_index("entropy").unwrap()].decimals(), 2);
     }
 
     #[test]
@@ -237,6 +266,6 @@ mod tests {
         assert_eq!(words.decimals(), 0);
         assert_eq!(words.present(200.0), 200.0);
         assert_eq!((words.raw)(&m), Some(200));
-        assert_eq!((FEATURES[8].get)(&m), None);
+        assert_eq!((FEATURES[feature_index("dictHit").unwrap()].get)(&m), None);
     }
 }
