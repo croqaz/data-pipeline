@@ -75,10 +75,13 @@ pub trait Store: Send + Sync {
     fn iter<'a>(&'a self, ks: Keyspace, lo: &Key, hi: Option<&Key>, values: bool) -> Result<KvIter<'a>>;
     /// [`Store::iter`] walked backwards: the same `[lo, hi)`, highest key first.
     fn iter_rev<'a>(&'a self, ks: Keyspace, lo: &Key, hi: Option<&Key>, values: bool) -> Result<KvIter<'a>>;
-    /// Write (`Some`) or delete (`None`) one value in one keyspace. The
-    /// low-level primitive behind delete and recompute; `put_batch` is the
+    /// Write (`Some`) or delete (`None`) one value in one keyspace. A
+    /// low-level primitive for tests and repairs; `put_batch` is the
     /// consistent way to add a document.
     fn put_raw(&self, ks: Keyspace, key: &Key, value: Option<&[u8]>) -> Result<()>;
+    /// Replace the `meta` record of existing documents, atomically per
+    /// call. What `recompute` writes; `text` and `extra` stay as they are.
+    fn put_meta_batch(&self, items: &[(Key, Vec<u8>)]) -> Result<()>;
     /// Remove documents from every keyspace, atomically per call. Keys
     /// that do not exist are ignored.
     fn delete_batch(&self, keys: &[Key]) -> Result<()>;
@@ -89,6 +92,7 @@ pub trait Store: Send + Sync {
     /// All stored source labels.
     fn sources(&self) -> Result<Vec<(u16, String)>>;
     fn put_source(&self, id: u16, label: &str) -> Result<()>;
+    fn delete_source(&self, id: u16) -> Result<()>;
     /// Make everything written so far durable.
     fn persist(&self) -> Result<()>;
     fn disk_size(&self) -> Result<u64>;
@@ -151,6 +155,46 @@ impl Sources {
     pub fn iter(&self) -> impl Iterator<Item = (u16, &str)> {
         self.names.iter().enumerate().filter_map(|(i, n)| n.as_deref().map(|n| (i as u16, n)))
     }
+}
+
+/// Remove source names that no stored document uses any more (after a
+/// relabel or a delete) and return them, sorted. Reads every meta record.
+pub fn prune_sources(store: &dyn Store) -> Result<Vec<String>> {
+    if store.sources()?.is_empty() {
+        return Ok(Vec::new());
+    }
+    let mut used = Vec::new();
+    store.scan_meta(&[0; 16], None, &mut |_, v| {
+        mark_used(&mut used, crate::meta::Meta::decode(v)?.source);
+        Ok(true)
+    })?;
+    remove_unused_sources(store, &used)
+}
+
+/// Record that a document uses source `id`; `used` grows as needed.
+pub fn mark_used(used: &mut Vec<bool>, id: u16) {
+    let i = id as usize;
+    if used.len() <= i {
+        used.resize(i + 1, false);
+    }
+    used[i] = true;
+}
+
+/// Remove every source name whose id is not marked in `used`; return the
+/// removed names, sorted.
+pub fn remove_unused_sources(store: &dyn Store, used: &[bool]) -> Result<Vec<String>> {
+    let mut removed = Vec::new();
+    for (id, name) in store.sources()? {
+        if !used.get(id as usize).copied().unwrap_or(false) {
+            store.delete_source(id)?;
+            removed.push(name);
+        }
+    }
+    if !removed.is_empty() {
+        store.persist()?;
+    }
+    removed.sort();
+    Ok(removed)
 }
 
 /// Is `dir` a pipeline store, or a place one may be created?
@@ -311,6 +355,15 @@ mod tests {
         store.put_raw(Keyspace::Text, &[7; 16], None).unwrap();
         store.put_raw(Keyspace::Meta, &[7; 16], None).unwrap();
         assert!(store.get_text(&[7; 16]).unwrap().is_none());
+        // meta rewrites touch nothing else
+        let fresh = crate::meta::Meta { words: 77, ..Default::default() }.encode();
+        store.put_meta_batch(&[([2; 16], fresh.clone()), ([3; 16], fresh)]).unwrap();
+        store.put_meta_batch(&[]).unwrap();
+        for b in [2u8, 3] {
+            assert_eq!(crate::meta::Meta::decode(&store.get_meta(&[b; 16]).unwrap().unwrap()).unwrap().words, 77);
+            assert_eq!(store.get_text(&[b; 16]).unwrap().unwrap(), format!("text {b}").as_bytes());
+        }
+        assert_eq!(store.get_extra(&[3; 16]).unwrap().unwrap(), b"{\"a\":1}");
 
         // a text above the blob threshold, so the engines that separate values have a blob file
         let big = Record { key: [8; 16], meta: crate::meta::Meta::default().encode(), text: vec![b'x'; 4096], extra: None, replace: false };

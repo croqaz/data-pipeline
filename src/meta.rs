@@ -1,10 +1,9 @@
 //! The per-document feature record and the feature registry.
 //!
-//! `Meta` is stored as a CBOR map with small integer keys (minicbor). Field
-//! numbers are permanent: a number is never reused, new features get the next
-//! free number and are `Option` so records written before the feature existed
-//! still decode (as `None`). Percent-like features are stored as basis points
-//! (`u16`, 10000 = 100%) and presented as percents with two decimals.
+//! `Meta` is stored as a CBOR map with small integer keys (minicbor), so a
+//! feature added later is one more optional field and one registry entry.
+//! Percent-like features are stored as basis points (`u16`, 10000 = 100%)
+//! and presented as percents with two decimals.
 
 use minicbor::{Decode, Encode};
 
@@ -26,15 +25,16 @@ pub struct Meta {
     /// UTF-8 bytes of the raw text.
     #[n(3)]
     pub bytes: u32,
+    /// Distinct characters.
     #[n(4)]
+    pub uniq_chars: u32,
+    #[n(5)]
     pub words: u32,
     /// Distinct words after lowercasing and apostrophe folding.
-    #[n(5)]
-    pub uniq_words: u32,
     #[n(6)]
-    pub sentences: u32,
+    pub uniq_words: u32,
     #[n(7)]
-    pub uniq_chars: u32,
+    pub sentences: u32,
     /// Basis points: alphabetic words containing a vowel, over alphabetic words.
     #[n(8)]
     pub vowel: u16,
@@ -46,13 +46,32 @@ pub struct Meta {
     /// Phase 2: dictionary hit rate in basis points. Reserved, not computed yet.
     #[n(11)]
     pub dict_hit: Option<u16>,
-    /// Order-0 Shannon entropy of the characters, hundredths of a bit.
-    /// `None` in records written before the feature existed.
+    /// Order-0 Shannon entropy of the characters as basis points of 4.47
+    /// bits per character: 10000 is 4.47 bits, clean period prose sits near 10000.
     #[n(12)]
     pub entropy: Option<u16>,
-    /// LZ4 compressed size over raw size, basis points. `None` as above.
+    /// LZ4 compressed size over raw size as basis points of 0.82: 10000 is
+    /// ordinary prose.
     #[n(13)]
     pub compress: Option<u16>,
+    /// Basis points of the characters covered by every occurrence of the
+    /// most frequent word 4-gram (0 unless it occurs twice).
+    #[n(14)]
+    pub top4gram: Option<u16>,
+    /// Basis points of the characters inside word 5-grams that occur more
+    /// than once.
+    #[n(15)]
+    pub dup5gram: Option<u16>,
+    /// Same for word 10-grams.
+    #[n(16)]
+    pub dup10gram: Option<u16>,
+    /// Mean characters per word, in hundredths (452 = 4.52).
+    #[n(17)]
+    pub mean_word_len: Option<u16>,
+    /// Basis points of the words that are in the stopword list
+    /// (`src/features/stopwords.txt`).
+    #[n(18)]
+    pub stop_words: Option<u16>,
 }
 
 impl Meta {
@@ -79,10 +98,9 @@ impl Meta {
 pub enum Kind {
     /// Plain integer.
     Int,
-    /// Stored as basis points, shown as a percent with two decimals.
+    /// Stored in hundredths (basis points for a percent), shown with two
+    /// decimals.
     Pct,
-    /// Stored in hundredths, shown with two decimals (bits per character).
-    Bits,
 }
 
 pub struct FeatureDef {
@@ -100,7 +118,7 @@ impl FeatureDef {
     pub fn decimals(&self) -> usize {
         match self.kind {
             Kind::Int => 0,
-            Kind::Pct | Kind::Bits => 2,
+            Kind::Pct => 2,
         }
     }
 
@@ -108,7 +126,7 @@ impl FeatureDef {
     pub fn present(&self, raw: f64) -> f64 {
         match self.kind {
             Kind::Int => raw,
-            Kind::Pct | Kind::Bits => raw / 100.0,
+            Kind::Pct => raw / 100.0,
         }
     }
 }
@@ -116,6 +134,12 @@ impl FeatureDef {
 macro_rules! int_feature {
     ($name:literal, $field:ident) => {
         FeatureDef { name: $name, kind: Kind::Int, get: |m| Some(f64::from(m.$field)), raw: |m| Some(u64::from(m.$field)) }
+    };
+}
+
+macro_rules! opt_pct_feature {
+    ($name:literal, $field:ident) => {
+        FeatureDef { name: $name, kind: Kind::Pct, get: |m| m.$field.map(|v| f64::from(v) / 100.0), raw: |m| m.$field.map(u64::from) }
     };
 }
 
@@ -130,15 +154,20 @@ macro_rules! pct_feature {
 pub const FEATURES: &[FeatureDef] = &[
     int_feature!("len", len),
     int_feature!("bytes", bytes),
+    int_feature!("uniqChars", uniq_chars),
     int_feature!("words", words),
     int_feature!("uniqWords", uniq_words),
+    opt_pct_feature!("meanWordLen", mean_word_len),
+    opt_pct_feature!("stopWords", stop_words),
     int_feature!("sentences", sentences),
-    int_feature!("uniqChars", uniq_chars),
     pct_feature!("vowel", vowel),
     pct_feature!("alpha", alpha),
-    FeatureDef { name: "entropy", kind: Kind::Bits, get: |m| m.entropy.map(|v| f64::from(v) / 100.0), raw: |m| m.entropy.map(u64::from) },
-    FeatureDef { name: "compress", kind: Kind::Pct, get: |m| m.compress.map(|v| f64::from(v) / 100.0), raw: |m| m.compress.map(u64::from) },
-    FeatureDef { name: "dictHit", kind: Kind::Pct, get: |m| m.dict_hit.map(|v| f64::from(v) / 100.0), raw: |m| m.dict_hit.map(u64::from) },
+    opt_pct_feature!("entropy", entropy),
+    opt_pct_feature!("compress", compress),
+    opt_pct_feature!("top4gram", top4gram),
+    opt_pct_feature!("dup5gram", dup5gram),
+    opt_pct_feature!("dup10gram", dup10gram),
+    opt_pct_feature!("dictHit", dict_hit),
 ];
 
 pub fn feature_index(name: &str) -> Option<usize> {
@@ -167,8 +196,13 @@ mod tests {
             alpha: 9800,
             flags: FLAG_HAS_EXTRA,
             dict_hit: None,
-            entropy: Some(431),
+            entropy: Some(9800),
             compress: Some(6020),
+            top4gram: None,
+            dup5gram: None,
+            dup10gram: None,
+            mean_word_len: None,
+            stop_words: None,
         }
     }
 
@@ -204,7 +238,7 @@ mod tests {
         // A record written by a newer binary: every v1 field plus field 99.
         let mut enc = minicbor::Encoder::new(Vec::new());
         enc.map(12).unwrap();
-        for (k, v) in [(0u8, 1u32), (1, 0), (2, 101), (3, 101), (4, 50), (5, 40), (6, 2), (7, 20), (8, 10_000), (9, 10_000), (10, 0)] {
+        for (k, v) in [(0u8, 1u32), (1, 0), (2, 101), (3, 101), (4, 20), (5, 50), (6, 40), (7, 2), (8, 10_000), (9, 10_000), (10, 0)] {
             enc.u8(k).unwrap().u32(v).unwrap();
         }
         enc.u8(99).unwrap().u32(7).unwrap();
@@ -229,7 +263,7 @@ mod tests {
 
     #[test]
     fn registry_lookup_and_presentation() {
-        assert_eq!(feature_index("words"), Some(2));
+        assert_eq!(feature_index("words"), Some(3));
         assert_eq!(feature_index("nope"), None);
         assert!(feature_names().contains(&"uniqWords"));
         let m = sample();

@@ -143,6 +143,17 @@ impl Store for FjallStore {
         }
     }
 
+    fn put_meta_batch(&self, items: &[(Key, Vec<u8>)]) -> Result<()> {
+        if items.is_empty() {
+            return Ok(());
+        }
+        let mut batch = self.db.batch();
+        for (key, meta) in items {
+            batch.insert(&self.meta, key.as_slice(), meta.as_slice());
+        }
+        batch.commit().map_err(Error::store)
+    }
+
     fn delete_batch(&self, keys: &[Key]) -> Result<()> {
         if keys.is_empty() {
             return Ok(());
@@ -195,6 +206,10 @@ impl Store for FjallStore {
 
     fn put_source(&self, id: u16, label: &str) -> Result<()> {
         self.sources.insert(id.to_be_bytes().as_slice(), label.as_bytes()).map_err(Error::store)
+    }
+
+    fn delete_source(&self, id: u16) -> Result<()> {
+        self.sources.remove(id.to_be_bytes().as_slice()).map_err(Error::store)
     }
 
     /// Flush memtables to segments and sync the journal, so later scans read

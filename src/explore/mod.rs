@@ -316,7 +316,6 @@ impl Explorer {
             "source": self.sources.name(doc.meta.source),
             "features": features_json(&doc.meta),
             "extra": extra,
-            "chars": doc.text.chars().count(),
             "text": doc.text,
         }))
     }
@@ -591,7 +590,7 @@ mod tests {
         let store = store::open(&dir.path().join("db"), true).unwrap();
         let rec = |key: Key, i: u8, words: u32| Record {
             key,
-            meta: Meta { words, source: u16::from(i % 2), entropy: Some(400), ..Default::default() }.encode(),
+            meta: Meta { words, source: u16::from(i % 2), entropy: Some(9000), ..Default::default() }.encode(),
             text: format!("doc {i} has words").into_bytes(),
             extra: (i % 2 == 1).then(|| format!("{{\"year\":{}}}", 1800 + u32::from(i)).into_bytes()),
             replace: false,
@@ -703,11 +702,11 @@ mod tests {
         assert_eq!(v["id"], hex(3));
         assert_eq!(v["source"], "gut");
         assert_eq!(v["features"]["words"], 3);
-        assert_eq!(v["features"]["entropy"], 4.0);
+        assert_eq!(v["features"]["entropy"], 90.0);
         assert_eq!(v["features"]["dictHit"], Value::Null);
         assert_eq!(v["extra"]["year"], 1803);
         assert_eq!(v["text"], "doc 3 has words");
-        assert_eq!(v["chars"], 15);
+        assert!(v.get("chars").is_none(), "len and bytes live in features");
         let (s, v) = get(&ex, "/api/doc/0303");
         assert_eq!((s, v["id"].as_str().unwrap()), (200, hex(3).as_str()));
         let (s, v) = get(&ex, &format!("/api/doc/{}", hex(2)));

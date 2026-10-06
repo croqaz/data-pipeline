@@ -93,7 +93,7 @@
     <div>source <b id="docSource"></b></div>
     <div class="grid" id="docFeatures"></div>
     <pre id="docExtra" class="extra" hidden></pre>
-    <div class="row"><b>text</b> <span id="docChars" class="muted"></span> <button id="btnFull" hidden></button></div>
+    <div class="row"><b>text</b> <button id="btnFull" hidden></button></div>
     <pre id="docText" class="text"></pre>
   </section>
   <div id="empty" class="muted">Loading…</div>
@@ -160,7 +160,6 @@ function showDoc(doc, pos) {
     extra.hidden = false;
     extra.textContent = Object.entries(doc.extra).map(([k, v]) => k + ' = ' + JSON.stringify(v)).join('\n');
   } else { extra.hidden = true; }
-  $('#docChars').textContent = fmt(doc.chars) + ' chars';
   renderText(doc.text, false);
   if (location.hash !== '#/id/' + doc.id) location.hash = '#/id/' + doc.id;
 }

@@ -50,23 +50,31 @@ pub struct CompactReport {
     pub before: u64,
     pub after: u64,
     pub secs: f64,
+    /// Source names no document used.
+    pub removed_sources: Vec<String>,
 }
 
 impl CompactReport {
     pub fn render(&self) -> String {
-        format!("Compacted store: {} -> {} in {} s\n", mb(self.before), mb(self.after), fmt_num(self.secs, 1))
+        let mut s = format!("Compacted store: {} -> {} in {} s\n", mb(self.before), mb(self.after), fmt_num(self.secs, 1));
+        if !self.removed_sources.is_empty() {
+            s.push_str(&format!("Unused sources removed: {}\n", self.removed_sources.join(", ")));
+        }
+        s
     }
 }
 
-/// Flush, rewrite every keyspace, flush again; report sizes and time.
+/// Drop unused source names, flush, rewrite every keyspace, flush again;
+/// report sizes and time.
 pub fn compact(store: &dyn Store) -> Result<CompactReport> {
     let t0 = Instant::now();
+    let removed_sources = crate::store::prune_sources(store)?;
     store.persist()?;
     let before = store.disk_size()?;
     store.compact()?;
     store.persist()?;
     let after = store.disk_size()?;
-    Ok(CompactReport { before, after, secs: t0.elapsed().as_secs_f64() })
+    Ok(CompactReport { before, after, secs: t0.elapsed().as_secs_f64(), removed_sources })
 }
 
 #[cfg(test)]
@@ -91,8 +99,10 @@ mod tests {
         assert!(s.ends_with("meta:       1 MB\n"), "{s}");
         let none = InfoReport { sources: vec![], details: vec![], ..rep };
         assert!(none.render().contains("Sources:    0 (none)\n"));
-        let c = CompactReport { before: 10_000_000, after: 9_000_000, secs: 1.26 };
+        let mut c = CompactReport { before: 10_000_000, after: 9_000_000, secs: 1.26, removed_sources: vec![] };
         assert_eq!(c.render(), "Compacted store: 10.0 MB -> 9.0 MB in 1.3 s\n");
+        c.removed_sources = vec!["a".into(), "b".into()];
+        assert!(c.render().ends_with("\nUnused sources removed: a, b\n"));
         assert_eq!(mb(0), "0.0 MB");
     }
 
@@ -106,5 +116,8 @@ mod tests {
         assert_eq!(rep.approx_docs, 0);
         let c = compact(&store).unwrap();
         assert_eq!((c.before, c.after), (0, 0));
+        // no document uses either name
+        assert_eq!(c.removed_sources, vec!["a", "z"]);
+        assert!(store.sources().unwrap().is_empty());
     }
 }

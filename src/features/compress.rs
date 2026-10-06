@@ -4,14 +4,22 @@
 //! only to repeated byte strings: a paragraph pasted fifty times, a table
 //! of near-identical rows, a looping generator. That makes it the
 //! complement of `entropy`, which sees only the symbol distribution and is
-//! blind to repetition. Ordinary prose lands around 55 to 70 percent; a
-//! degenerate loop drops below 10; random-looking OCR noise sits at 100
-//! or just above (LZ4 cannot shrink it and adds a little framing).
+//! blind to repetition.
+//!
+//! The value is the LZ4 ratio divided by [`COMPRESS_NORM`], so ordinary
+//! period prose reads about 100, a degenerate loop under 10 and random-looking
+//! OCR noise about 130.
 
 use lz4_flex::block::{compress_into, get_maximum_output_size};
 
-/// Compressed size over raw size, in basis points (10000 = 100%), capped
-/// at the u16 range. `buf` is reused across documents.
+/// The LZ4 ratio that counts as 100: set so the median document of the clean
+/// Vintage-1 store (1.14 M documents) reads about 99.5. LZ4 only finds
+/// repeats inside one document, so shorter documents read above 100 and
+/// longer ones below: compare documents of similar length.
+pub const COMPRESS_NORM: f64 = 0.82;
+
+/// Compressed size over raw size, as basis points of [`COMPRESS_NORM`]
+/// (10000 = 100), capped at the u16 range. `buf` is reused across documents.
 pub fn compress_ratio(bytes: &[u8], buf: &mut Vec<u8>) -> u16 {
     if bytes.is_empty() {
         return 0;
@@ -21,8 +29,8 @@ pub fn compress_ratio(bytes: &[u8], buf: &mut Vec<u8>) -> u16 {
         buf.resize(need, 0);
     }
     let out = compress_into(bytes, buf).expect("buffer sized by get_maximum_output_size");
-    let bp = (out as u64 * 10_000 + bytes.len() as u64 / 2) / bytes.len() as u64;
-    bp.min(u64::from(u16::MAX)) as u16
+    let bp = (out as f64 / bytes.len() as f64 / COMPRESS_NORM * 10_000.0).round();
+    bp.min(f64::from(u16::MAX)) as u16
 }
 
 #[cfg(test)]
@@ -50,9 +58,9 @@ nothing before us, we were all going direct to Heaven, we were all going direct 
         let l = compress_ratio(looped.as_bytes(), &mut buf);
         let p = compress_ratio(prose.as_bytes(), &mut buf);
         let n = compress_ratio(noise.as_bytes(), &mut buf);
-        assert!(l < 200, "a loop compresses to under 2%: {l}");
-        assert!((3000..8000).contains(&p), "prose: {p}");
-        assert!(n >= 9800, "noise does not compress: {n}");
+        assert!(l < 300, "a loop compresses to under 3: {l}");
+        assert!((4000..10_000).contains(&p), "prose: {p}");
+        assert!(n >= 12_000, "noise does not compress: {n}");
         // the buffer grows once and is reused
         let cap = buf.len();
         compress_ratio(prose.as_bytes(), &mut buf);

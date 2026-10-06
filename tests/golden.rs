@@ -25,6 +25,13 @@ struct Expected {
     vowel: Option<u16>,
     alpha: Option<u16>,
     entropy: Option<u16>,
+    #[serde(rename = "meanWordLen")]
+    mean_word_len: Option<u16>,
+    #[serde(rename = "stopWords")]
+    stop_words: Option<u16>,
+    top4gram: Option<u16>,
+    dup5gram: Option<u16>,
+    dup10gram: Option<u16>,
 }
 
 #[test]
@@ -44,6 +51,7 @@ fn golden() {
                 assert!(want.drop.is_none(), "{} should have been dropped", case.name);
                 let meta = f.to_meta(0, false);
                 let got = (f.len, f.bytes, f.words, f.uniq_words, f.sentences, f.uniq_chars, meta.vowel, meta.alpha, meta.entropy.unwrap());
+                let want_ngrams = &want;
                 let want = (
                     want.len.unwrap(),
                     want.bytes.unwrap(),
@@ -57,6 +65,14 @@ fn golden() {
                 );
                 assert!(meta.compress.is_some_and(|c| c > 0), "{}", case.name);
                 assert_eq!(got, want, "{}", case.name);
+                assert_eq!(
+                    (meta.mean_word_len, meta.stop_words),
+                    (want_ngrams.mean_word_len, want_ngrams.stop_words),
+                    "{} word length and stopwords",
+                    case.name
+                );
+                let ngrams = (meta.top4gram, meta.dup5gram, meta.dup10gram);
+                assert_eq!(ngrams, (want_ngrams.top4gram, want_ngrams.dup5gram, want_ngrams.dup10gram), "{} n-grams", case.name);
             }
         }
         checked += 1;

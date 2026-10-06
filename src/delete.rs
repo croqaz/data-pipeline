@@ -14,7 +14,7 @@ use crate::expr;
 use crate::hash::Key;
 use crate::show::resolve_id;
 use crate::stats::{ScanConfig, scan};
-use crate::store::{Sources, Store};
+use crate::store::{self, Sources, Store};
 use crate::util::{fmt_int, fmt_mb, fmt_num};
 
 pub const DEFAULT_BATCH: usize = 2000;
@@ -100,6 +100,8 @@ pub struct DeleteReport {
     pub secs: f64,
     pub approx_docs: u64,
     pub disk: u64,
+    /// Source names no remaining document uses.
+    pub removed_sources: Vec<String>,
 }
 
 impl DeleteReport {
@@ -114,6 +116,9 @@ impl DeleteReport {
             fmt_int(self.approx_docs),
             fmt_mb(self.disk)
         ));
+        if !self.removed_sources.is_empty() {
+            s.push_str(&format!("  Unused sources removed: {}\n", self.removed_sources.join(", ")));
+        }
         s
     }
 }
@@ -132,7 +137,9 @@ pub fn run(
         None => None,
     };
     let deleted = delete_keys(store, &sel.keys, opts.batch_size)?;
+    let removed_sources = if deleted > 0 { store::prune_sources(store)? } else { Vec::new() };
     Ok(DeleteReport {
+        removed_sources,
         scanned: sel.scanned,
         deleted,
         backup,
@@ -247,7 +254,7 @@ mod tests {
         let rep = run(store.as_ref(), &sources, &o, sel, &mut log).unwrap();
         assert_eq!(rep.deleted, 1);
         assert_eq!(std::fs::read_to_string(&backup).unwrap().lines().count(), 1);
-        let plain = DeleteReport { scanned: 0, deleted: 0, backup: None, secs: 0.0, approx_docs: 1, disk: 0 };
+        let plain = DeleteReport { scanned: 0, deleted: 0, backup: None, secs: 0.0, approx_docs: 1, disk: 0, removed_sources: vec![] };
         assert!(!plain.render().contains("Backup"));
         assert_eq!(delete_keys(store.as_ref(), &[], 0).unwrap(), 0);
     }

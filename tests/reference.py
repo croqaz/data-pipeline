@@ -133,15 +133,77 @@ def basis_points(num, den):
     return min(10_000, (num * 10_000 + den // 2) // den)
 
 
+def folded_words(text):
+    out = []
+    for raw in split_words(text):
+        tok = strip_token(raw)
+        if tok:
+            out.append(fold(tok))
+    return out
+
+
+STOPWORDS = {
+    w
+    for line in (HERE.parent / "src" / "features" / "stopwords.txt").read_text(encoding="utf-8").splitlines()
+    if not line.lstrip().startswith("#")
+    for w in line.split()
+}
+
+
+def mean_word_len(words):
+    """Mean characters per word in hundredths, rounded half up."""
+    if not words:
+        return 0
+    return min(65_535, (sum(len(w) for w in words) * 100 + len(words) // 2) // len(words))
+
+
+def stop_share(words):
+    return basis_points(sum(w in STOPWORDS for w in words), len(words))
+
+
+def ngram_counts(words, n):
+    grams = [tuple(words[i : i + n]) for i in range(len(words) - n + 1)]
+    return grams, Counter(grams)
+
+
+def top_ngram(words, n):
+    """Characters covered by every occurrence of the most frequent n-gram
+    (first seen wins a tie), over all word characters; 0 unless it repeats."""
+    total = sum(len(w) for w in words)
+    grams, counts = ngram_counts(words, n)
+    best, best_gram = 1, None
+    for g in grams:
+        if counts[g] > best:
+            best, best_gram = counts[g], g
+    if best_gram is None or total == 0:
+        return 0
+    return basis_points(best * sum(len(w) for w in best_gram), total)
+
+
+def dup_ngram(words, n):
+    """Characters of the words inside any n-gram occurring more than once,
+    each word counted once, over all word characters."""
+    total = sum(len(w) for w in words)
+    grams, counts = ngram_counts(words, n)
+    marked = [False] * len(words)
+    for i, g in enumerate(grams):
+        if counts[g] >= 2:
+            for j in range(i, i + n):
+                marked[j] = True
+    if total == 0:
+        return 0
+    return basis_points(sum(len(w) for w, m in zip(words, marked) if m), total)
+
+
 def char_entropy(text):
-    """Order-0 Shannon entropy in hundredths of a bit per character, summed
-    over the counts in ascending order (the Rust code sums the same way)."""
+    """Order-0 Shannon entropy as basis points of 4.47 bits per character,
+    summed over the counts in ascending order (the Rust code sums the same way)."""
     counts = sorted(Counter(text).values())
     n = sum(counts)
     if n == 0:
         return 0
     h = math.log2(n) - sum(c * math.log2(c) for c in counts) / n
-    return min(65_535, round(max(h, 0.0) * 100))
+    return min(65_535, round(max(h, 0.0) / 4.47 * 10_000))
 
 
 def compute(text, max_len=MAX_LEN):
@@ -161,6 +223,7 @@ def compute(text, max_len=MAX_LEN):
     words, uniq_words, alpha, vowel = word_stats(text)
     if words < MIN_WORDS:
         return {"drop": "few_words"}
+    folded = folded_words(text)
     return {
         "len": length,
         "bytes": nbytes,
@@ -173,6 +236,11 @@ def compute(text, max_len=MAX_LEN):
         # `compress` (LZ4 ratio) is not here: no independent LZ4 is installed,
         # so src/features/compress.rs checks it against known inputs instead.
         "entropy": char_entropy(text),
+        "meanWordLen": mean_word_len(folded),
+        "stopWords": stop_share(folded),
+        "top4gram": top_ngram(folded, 4),
+        "dup5gram": dup_ngram(folded, 5),
+        "dup10gram": dup_ngram(folded, 10),
     }
 
 
@@ -238,6 +306,8 @@ CASES = [
     {"name": "no_sentence_end", "text": "words " * 30},
     {"name": "all_caps_headline", "text": "THE QUICK BROWN FOX JUMPS OVER THE LAZY DOG. THE FIVE BOXING WIZARDS JUMP QUICKLY. PACK MY BOX WITH FIVE DOZEN JUGS."},
     {"name": "numbers_and_symbols", "text": "#### 1234 5678 9012 3456 7890 ##### $$$$ %%%% &&&& **** ((( ))) [[[ ]]] {{{ }}} <<< >>> ~~~ ^^^ 42 43 44 45 46 47 48 49 50 51 52 53"},
+    {"name": "drift_into_loop", "text": PROSE + " " + "the same eleven words keep coming back here again and again " * 12},
+    {"name": "refrain", "text": RAVEN * 3},
     {"name": "cjk_only", "text": "これは日本語の文章です。" * 12 + " 単語 単語 単語"},
 ]
 

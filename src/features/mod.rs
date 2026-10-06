@@ -5,6 +5,7 @@
 
 pub mod chars;
 pub mod compress;
+pub mod ngrams;
 pub mod sentences;
 pub mod words;
 
@@ -68,6 +69,7 @@ pub struct Scratch {
     pub words: words::WordScratch,
     pub norm: Vec<u8>,
     pub lz4: Vec<u8>,
+    pub ngrams: ngrams::NgramScratch,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -80,10 +82,14 @@ pub struct Features {
     pub uniq_chars: u32,
     pub alpha_words: u32,
     pub vowel_words: u32,
+    /// Characters in all words.
+    pub word_chars: u64,
+    pub stop_words: u32,
     /// Hundredths of a bit per character.
     pub entropy: u16,
-    /// LZ4 size over raw size, basis points.
+    /// LZ4 size over raw size, basis points of `COMPRESS_NORM`.
     pub compress: u16,
+    pub ngrams: ngrams::NgramStats,
 }
 
 /// Basis points of `num / den`, rounded; 0 when `den` is 0.
@@ -93,6 +99,16 @@ pub fn basis_points(num: u32, den: u32) -> u16 {
     }
     let bp = (u64::from(num) * 10_000 + u64::from(den) / 2) / u64::from(den);
     bp.min(10_000) as u16
+}
+
+/// `num / den` in hundredths, rounded and capped at the u16 range; 0 when
+/// `den` is 0.
+pub fn hundredths(num: u64, den: u32) -> u16 {
+    if den == 0 {
+        return 0;
+    }
+    let v = (u128::from(num) * 100 + u128::from(den) / 2) / u128::from(den);
+    v.min(u128::from(u16::MAX)) as u16
 }
 
 impl Features {
@@ -112,6 +128,11 @@ impl Features {
             dict_hit: None,
             entropy: Some(self.entropy),
             compress: Some(self.compress),
+            mean_word_len: Some(hundredths(self.word_chars, self.words)),
+            stop_words: Some(basis_points(self.stop_words, self.words)),
+            top4gram: Some(self.ngrams.top4),
+            dup5gram: Some(self.ngrams.dup5),
+            dup10gram: Some(self.ngrams.dup10),
         }
     }
 }
@@ -141,6 +162,7 @@ pub fn compute(text: &str, max_len: u32, scratch: &mut Scratch) -> Result<Featur
     if w.words < MIN_WORDS {
         return Err(DropReason::FewWords);
     }
+    let ngrams = ngrams::ngram_stats(scratch.words.hashes(), scratch.words.lens(), &mut scratch.ngrams);
     let sentences = sentences::count_sentences(text);
     let compress = compress::compress_ratio(text.as_bytes(), &mut scratch.lz4);
     Ok(Features {
@@ -152,8 +174,11 @@ pub fn compute(text: &str, max_len: u32, scratch: &mut Scratch) -> Result<Featur
         uniq_chars,
         alpha_words: w.alpha_words,
         vowel_words: w.vowel_words,
+        word_chars: w.word_chars,
+        stop_words: w.stop_words,
         entropy: cs.entropy,
         compress,
+        ngrams,
     })
 }
 
@@ -201,6 +226,14 @@ How vexingly quick daft zebras jump. The five boxing wizards jump quickly.";
         let two_words = format!("wordone {}", "abcdefghijklmnopqrstuvwxyz0123456789".repeat(4));
         assert_eq!(compute(&two_words, DEFAULT_MAX_LEN, &mut sc), Err(DropReason::FewWords));
         assert!(compute(PROSE, DEFAULT_MAX_LEN, &mut sc).is_ok());
+    }
+
+    #[test]
+    fn hundredths_round_and_clamp() {
+        assert_eq!(hundredths(1, 0), 0);
+        assert_eq!(hundredths(35, 9), 389);
+        assert_eq!(hundredths(9, 2), 450);
+        assert_eq!(hundredths(u64::MAX, 1), u16::MAX);
     }
 
     #[test]

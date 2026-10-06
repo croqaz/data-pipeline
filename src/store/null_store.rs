@@ -38,6 +38,9 @@ impl Store for NullStore {
     fn put_raw(&self, _: Keyspace, _: &Key, _: Option<&[u8]>) -> Result<()> {
         Ok(())
     }
+    fn put_meta_batch(&self, _: &[(Key, Vec<u8>)]) -> Result<()> {
+        Ok(())
+    }
     fn delete_batch(&self, _: &[Key]) -> Result<()> {
         Ok(())
     }
@@ -52,6 +55,10 @@ impl Store for NullStore {
     }
     fn put_source(&self, id: u16, label: &str) -> Result<()> {
         self.sources.lock().expect("lock").push((id, label.to_string()));
+        Ok(())
+    }
+    fn delete_source(&self, id: u16) -> Result<()> {
+        self.sources.lock().expect("lock").retain(|(i, _)| *i != id);
         Ok(())
     }
     fn persist(&self) -> Result<()> {
@@ -85,6 +92,7 @@ mod tests {
         assert_eq!(e.iter(Keyspace::Meta, &[0; 16], None, true).unwrap().count(), 0);
         assert_eq!(e.iter_rev(Keyspace::Meta, &[0; 16], None, true).unwrap().count(), 0);
         e.put_raw(Keyspace::Text, &[0; 16], Some(b"x")).unwrap();
+        e.put_meta_batch(&[([0; 16], vec![1])]).unwrap();
         e.delete_batch(&[[0; 16]]).unwrap();
         e.compact().unwrap();
         assert!(e.details().unwrap().is_empty());

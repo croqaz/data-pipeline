@@ -23,6 +23,8 @@ pub enum Command {
     Stats(StatsArgs),
     /// Count documents matching an expression.
     Count(CountArgs),
+    /// Print the documents matching an expression (first N, or sorted by a feature).
+    Query(QueryArgs),
     /// Write matching documents as JSONL (the only way out).
     Export(ExportArgs),
     /// Verify that the store is internally consistent.
@@ -37,6 +39,8 @@ pub enum Command {
     Delete(DeleteArgs),
     /// Browse the store in a web browser: random, next, prev, query, count. Read-only.
     Explore(ExploreArgs),
+    /// Re-read every text and rewrite its features with this build's scanners.
+    Recompute(RecomputeArgs),
 }
 
 #[derive(Args, Debug, Clone)]
@@ -50,16 +54,16 @@ pub struct StoreArgs {
 pub struct ImportArgs {
     #[command(flatten)]
     pub store: StoreArgs,
-    /// Source label for documents whose record has no source key.
-    #[arg(short, long, default_value = "cli")]
-    pub source: String,
-    /// JSON key that overrides the source label per record ("" to disable).
+    /// Source label for every document; the record's source key is ignored.
+    #[arg(short, long)]
+    pub source: Option<String>,
+    /// JSON key holding a per-record source label, used when -s is not given ("" to disable).
     #[arg(long, default_value = "source")]
     pub source_key: String,
     /// JSON key holding the document text.
     #[arg(short = 'k', long, default_value = "text")]
     pub text_key: String,
-    /// Comma-separated JSON keys to keep as metadata.
+    /// Comma-separated JSON keys to keep as metadata; KEY=NAME stores KEY under NAME.
     #[arg(short, long, value_delimiter = ',')]
     pub extra: Vec<String>,
     /// Drop documents longer than this many characters.
@@ -118,6 +122,46 @@ pub struct CountArgs {
     /// Expression to count (default: every document).
     pub expr: Option<String>,
     /// Scan threads (default: all logical CPUs).
+    #[arg(short, long)]
+    pub threads: Option<usize>,
+}
+
+#[derive(Args, Debug, Clone)]
+pub struct QueryArgs {
+    #[command(flatten)]
+    pub store: StoreArgs,
+    /// Only documents matching this expression (default: every document).
+    pub expr: Option<String>,
+    /// Show at most N documents.
+    #[arg(short, long, default_value_t = crate::query::DEFAULT_LIMIT)]
+    pub limit: usize,
+    /// Show the documents with the highest values of this feature first
+    /// (scans the whole store).
+    #[arg(short, long, value_name = "FEATURE")]
+    pub sort: Option<String>,
+    /// With --sort, lowest values first.
+    #[arg(long, requires = "sort")]
+    pub asc: bool,
+    /// Start at a random point in the store, for a different sample each run.
+    #[arg(long, conflicts_with = "sort")]
+    pub random: bool,
+    /// Seed for --random, to repeat a sample.
+    #[arg(long, requires = "random")]
+    pub seed: Option<u64>,
+    /// Show only the first N characters of each text.
+    #[arg(long, conflicts_with = "full")]
+    pub head: Option<usize>,
+    /// Show whole texts (by default a text over 16,000 characters shows its
+    /// first and last 8,000).
+    #[arg(long)]
+    pub full: bool,
+    /// Print the export JSON line per document.
+    #[arg(long, conflicts_with_all = ["ids", "head", "full"])]
+    pub json: bool,
+    /// Print only the ids, one per line.
+    #[arg(long, conflicts_with_all = ["head", "full"])]
+    pub ids: bool,
+    /// Scan threads for --sort (default: all logical CPUs).
     #[arg(short, long)]
     pub threads: Option<usize>,
 }
@@ -261,6 +305,24 @@ pub struct ExploreArgs {
     pub threads: Option<usize>,
 }
 
+#[derive(Args, Debug, Clone)]
+pub struct RecomputeArgs {
+    #[command(flatten)]
+    pub store: StoreArgs,
+    /// Compute and count, write nothing.
+    #[arg(long)]
+    pub dry_run: bool,
+    /// Rewrite every record, even one that is already up to date.
+    #[arg(long, conflicts_with = "dry_run")]
+    pub force: bool,
+    /// Threads (default: all logical CPUs).
+    #[arg(short, long)]
+    pub threads: Option<usize>,
+    /// Records per atomic store write.
+    #[arg(long, default_value_t = crate::recompute::DEFAULT_BATCH)]
+    pub batch_size: usize,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -354,5 +416,42 @@ mod tests {
         let Command::Explore(a) = cli.cmd else { panic!() };
         assert_eq!((a.port, a.bind.as_str(), a.threads), (0, "0.0.0.0", Some(2)));
         assert!(Cli::try_parse_from(["pipeline", "explore", "--db", "x", "-p", "70000"]).is_err(), "a port fits in 16 bits");
+        let cli = Cli::try_parse_from(["pipeline", "recompute", "--db", "x"]).unwrap();
+        let Command::Recompute(a) = cli.cmd else { panic!() };
+        assert_eq!((a.dry_run, a.force, a.threads, a.batch_size), (false, false, None, crate::recompute::DEFAULT_BATCH));
+        let cli = Cli::try_parse_from(["pipeline", "recompute", "--db", "x", "--dry-run", "-t", "3", "--batch-size", "10"]).unwrap();
+        let Command::Recompute(a) = cli.cmd else { panic!() };
+        assert_eq!((a.dry_run, a.threads, a.batch_size), (true, Some(3), 10));
+        assert!(Cli::try_parse_from(["pipeline", "recompute", "--db", "x", "--force"]).is_ok());
+        assert!(
+            Cli::try_parse_from(["pipeline", "recompute", "--db", "x", "--force", "--dry-run"]).is_err(),
+            "force and dry-run exclude each other"
+        );
+    }
+
+    #[test]
+    fn query_args() {
+        let cli = Cli::try_parse_from(["pipeline", "query", "--db", "d", "dup10gram > 3", "-s", "dup10gram", "--asc", "-l", "5", "--ids"])
+            .unwrap();
+        let Command::Query(a) = cli.cmd else { panic!() };
+        assert_eq!(
+            (a.expr.as_deref(), a.sort.as_deref(), a.asc, a.limit, a.ids),
+            (Some("dup10gram > 3"), Some("dup10gram"), true, 5, true)
+        );
+        let cli = Cli::try_parse_from(["pipeline", "query", "--db", "d", "--random", "--seed", "3", "--head", "100"]).unwrap();
+        let Command::Query(a) = cli.cmd else { panic!() };
+        assert_eq!((a.random, a.seed, a.head, a.limit, a.expr), (true, Some(3), Some(100), crate::query::DEFAULT_LIMIT, None));
+        for bad in [
+            &["--asc"][..],
+            &["--seed", "1"],
+            &["--random", "--sort", "words"],
+            &["--json", "--ids"],
+            &["--head", "5", "--full"],
+            &["--json", "--full"],
+            &["--ids", "--head", "3"],
+        ] {
+            let args: Vec<&str> = ["pipeline", "query", "--db", "d"].iter().chain(bad.iter()).copied().collect();
+            assert!(Cli::try_parse_from(args).is_err(), "{bad:?}");
+        }
     }
 }

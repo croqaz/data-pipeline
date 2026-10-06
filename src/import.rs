@@ -7,6 +7,7 @@
 
 use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
@@ -32,13 +33,18 @@ pub enum OnError {
     Abort,
 }
 
+/// Source label for documents with neither `--source` nor a source key.
+pub const DEFAULT_SOURCE: &str = "cli";
+
 #[derive(Debug, Clone)]
 pub struct ImportOptions {
     pub db: PathBuf,
-    pub source: String,
+    /// Label for every document. `None` reads `source_key`, then falls back to `DEFAULT_SOURCE`.
+    pub source: Option<String>,
     pub source_key: String,
     pub text_key: String,
-    pub extra: Vec<String>,
+    /// Record keys kept as metadata, each with the name it is stored under.
+    pub extra: Vec<(String, String)>,
     pub max_len: u32,
     pub workers: usize,
     pub offset: u64,
@@ -57,7 +63,7 @@ impl ImportOptions {
     pub fn new(db: PathBuf, inputs: Vec<PathBuf>) -> Self {
         Self {
             db,
-            source: "cli".into(),
+            source: None,
             source_key: "source".into(),
             text_key: "text".into(),
             extra: Vec::new(),
@@ -90,6 +96,8 @@ pub struct Counts {
     pub duplicates: u64,
     /// Conflicts where the new copy won.
     pub replaced: u64,
+    /// Stored documents re-imported with the same text and a new source or extra.
+    pub updated: u64,
     /// New documents.
     pub indexed: u64,
 }
@@ -106,7 +114,7 @@ impl Counts {
 
     /// Every line is accounted for exactly once.
     pub fn balanced(&self) -> bool {
-        self.lines == self.skipped + self.empty + self.dropped_total() + self.duplicates + self.replaced + self.indexed
+        self.lines == self.skipped + self.empty + self.dropped_total() + self.duplicates + self.replaced + self.updated + self.indexed
     }
 
     pub fn add(&mut self, o: &Counts) {
@@ -118,6 +126,7 @@ impl Counts {
         }
         self.duplicates += o.duplicates;
         self.replaced += o.replaced;
+        self.updated += o.updated;
         self.indexed += o.indexed;
     }
 }
@@ -127,6 +136,8 @@ pub struct FileReport {
     pub path: PathBuf,
     pub counts: Counts,
     pub bytes: u64,
+    /// False when `--limit` or an abort stopped the import before this file was opened.
+    pub reached: bool,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -145,13 +156,19 @@ pub struct ImportReport {
     pub peak_rss: u64,
     /// Resident memory at the end, split (anonymous, file-backed).
     pub rss_split: Option<(u64, u64)>,
+    /// Source names no document uses after this import's updates and replacements.
+    pub removed_sources: Vec<String>,
 }
 
 impl ImportReport {
     pub fn render(&self) -> String {
         let mut s = String::new();
         for f in &self.files {
-            s.push_str(&format!("File: {}\n", f.path.display()));
+            if !f.reached {
+                s.push_str(&format!("Not reached: {}\n", f.path.display()));
+                continue;
+            }
+            s.push_str(&format!("Imported: {}\n", f.path.display()));
             s.push_str(&format!(
                 "  Lines:      {:>12}  ({} skipped by --offset, {} empty)\n",
                 fmt_int(f.counts.lines),
@@ -170,15 +187,17 @@ impl ImportReport {
             ));
             s.push_str(&format!("  Duplicates: {:>12}  (stored copy kept)\n", fmt_int(f.counts.duplicates)));
             s.push_str(&format!("  Replaced:   {:>12}  (new copy scored higher)\n", fmt_int(f.counts.replaced)));
+            s.push_str(&format!("  Updated:    {:>12}  (same text, new source or extra)\n", fmt_int(f.counts.updated)));
             s.push_str(&format!("  Indexed:    {:>12}\n", fmt_int(f.counts.indexed)));
         }
         let secs = self.elapsed.as_secs_f64();
         let docs = self.totals.indexed + self.totals.replaced;
         s.push_str(&format!(
-            "Totals: {} lines, {} indexed, {} replaced, {} duplicates, {} dropped\n",
+            "Totals: {} lines, {} indexed, {} replaced, {} updated, {} duplicates, {} dropped\n",
             fmt_int(self.totals.lines),
             fmt_int(self.totals.indexed),
             fmt_int(self.totals.replaced),
+            fmt_int(self.totals.updated),
             fmt_int(self.totals.duplicates),
             fmt_int(self.totals.dropped_total())
         ));
@@ -194,6 +213,9 @@ impl ImportReport {
                 fmt_int(self.approx_docs),
                 fmt_num(self.disk_size as f64 / 1e6, 1)
             ));
+        }
+        if !self.removed_sources.is_empty() {
+            s.push_str(&format!("Unused sources removed: {}\n", self.removed_sources.join(", ")));
         }
         match self.rss_split {
             Some((anon, file)) => s.push_str(&format!(
@@ -221,7 +243,7 @@ impl ImportReport {
 struct WorkerCfg {
     text_key: String,
     source_key: String,
-    extra: Vec<String>,
+    extra: Vec<(String, String)>,
     max_len: u32,
     keep_raw: bool,
 }
@@ -254,6 +276,29 @@ fn decode_str(v: &sonic_rs::LazyValue<'_>) -> std::result::Result<String, DropRe
 }
 
 /// Build the raw JSON object holding the kept extra fields.
+/// Parse `--extra` items: `key` keeps a record key under its own name,
+/// `key=name` stores it under `name`. Each key and each name may appear once.
+pub fn parse_extra(items: &[String]) -> Result<Vec<(String, String)>> {
+    let mut out: Vec<(String, String)> = Vec::with_capacity(items.len());
+    for item in items {
+        let (from, to) = match item.split_once('=') {
+            Some((f, t)) => (f.trim(), t.trim()),
+            None => (item.trim(), item.trim()),
+        };
+        if from.is_empty() || to.is_empty() || to.contains('=') {
+            return Err(Error::Usage(format!("--extra {item:?}: expected KEY or KEY=NAME")));
+        }
+        if out.iter().any(|(f, _)| f == from) {
+            return Err(Error::Usage(format!("--extra: key {from:?} is listed twice")));
+        }
+        if out.iter().any(|(_, t)| t == to) {
+            return Err(Error::Usage(format!("--extra: two keys are stored as {to:?}")));
+        }
+        out.push((from.to_string(), to.to_string()));
+    }
+    Ok(out)
+}
+
 fn extra_json(fields: &[(String, String)]) -> String {
     let mut s = String::from("{");
     for (i, (k, raw)) in fields.iter().enumerate() {
@@ -288,11 +333,11 @@ fn process_line(line: &[u8], cfg: &WorkerCfg, scratch: &mut Scratch) -> std::res
         if !cfg.source_key.is_empty() && k == cfg.source_key && v.is_str() {
             source = Some(decode_str(&v)?);
         }
-        if cfg.extra.iter().any(|e| *e == k) {
+        if let Some((_, name)) = cfg.extra.iter().find(|(from, _)| *from == k) {
             let raw = v.as_raw_str().to_string();
-            match extras.iter_mut().find(|(ek, _)| *ek == k) {
+            match extras.iter_mut().find(|(ek, _)| ek == name) {
                 Some(slot) => slot.1 = raw,
-                None => extras.push((k.to_string(), raw)),
+                None => extras.push((name.clone(), raw)),
             }
         }
     }
@@ -357,7 +402,11 @@ pub fn set_nocow(dir: &Path) -> std::io::Result<()> {
     Ok(())
 }
 
-struct Writer<'a> {
+/// The reader and the writer share the log: the reader announces each
+/// file as it opens it, the writer prints the running counts.
+type Log<'l> = Mutex<&'l mut (dyn Write + Send)>;
+
+struct Writer<'a, 'l> {
     store: &'a dyn Store,
     opts: &'a ImportOptions,
     sources: Sources,
@@ -370,10 +419,10 @@ struct Writer<'a> {
     abort: Option<Error>,
     last_progress: u64,
     started: Instant,
-    log: &'a mut dyn Write,
+    log: &'a Log<'l>,
 }
 
-impl Writer<'_> {
+impl Writer<'_, '_> {
     fn loaded_total(&self) -> u64 {
         self.counts.iter().map(Counts::loaded).sum()
     }
@@ -388,7 +437,7 @@ impl Writer<'_> {
     }
 
     fn add_doc(&mut self, file: usize, doc: Doc) -> Result<()> {
-        let label = doc.source.as_deref().unwrap_or(&self.opts.source);
+        let label = self.opts.source.as_deref().or(doc.source.as_deref()).unwrap_or(DEFAULT_SOURCE);
         let sid = self.sources.intern(label, self.store)?;
         let meta = doc.features.to_meta(sid, doc.extra.is_some());
         let mut record = Record {
@@ -422,6 +471,19 @@ impl Writer<'_> {
                 self.pending.insert(record.key, self.batch.len());
                 self.batch.push(record);
                 counts.replaced += 1;
+            } else if old_text == record.text
+                && (old_meta.source != meta.source || (record.extra.is_some() && self.store.get_extra(&record.key)? != record.extra))
+            {
+                // The same document imported again: its newer labels win. An
+                // import without extras keeps the stored ones.
+                if record.extra.is_none() {
+                    record.extra = self.store.get_extra(&record.key)?;
+                    record.meta = doc.features.to_meta(sid, record.extra.is_some()).encode();
+                }
+                record.replace = true;
+                self.pending.insert(record.key, self.batch.len());
+                self.batch.push(record);
+                counts.updated += 1;
             } else {
                 counts.duplicates += 1;
             }
@@ -470,24 +532,38 @@ impl Writer<'_> {
             self.last_progress = loaded;
             let secs = self.started.elapsed().as_secs_f64();
             let indexed: u64 = self.counts.iter().map(|c| c.indexed + c.replaced).sum();
-            writeln!(self.log, "  {} lines, {} indexed, {}", fmt_int(loaded), fmt_int(indexed), fmt_rate(self.bytes, secs))?;
+            let mut log = self.log.lock().expect("log lock");
+            writeln!(log, "  {} lines, {} indexed, {}", fmt_int(loaded), fmt_int(indexed), fmt_rate(self.bytes, secs))?;
         }
         Ok(())
     }
+}
+
+/// What the reader learned, per input file.
+struct ReaderOutcome {
+    skipped: Vec<u64>,
+    sizes: Vec<u64>,
+    reached: Vec<bool>,
+    hit_limit: bool,
 }
 
 fn reader_loop(
     opts: &ImportOptions,
     tx: &crossbeam_channel::Sender<(usize, Chunk)>,
     stop: &AtomicBool,
-) -> Result<(Vec<u64>, Vec<u64>, bool)> {
-    let mut skipped = vec![0u64; opts.inputs.len()];
-    let mut sizes = vec![0u64; opts.inputs.len()];
+    log: &Log<'_>,
+) -> Result<ReaderOutcome> {
+    let n = opts.inputs.len();
+    let mut out = ReaderOutcome { skipped: vec![0; n], sizes: vec![0; n], reached: vec![false; n], hit_limit: false };
     let mut skip = opts.offset;
     let mut limit = opts.limit;
-    let mut hit_limit = false;
     'files: for (i, path) in opts.inputs.iter().enumerate() {
-        sizes[i] = std::fs::metadata(path)?.len();
+        if stop.load(Ordering::Relaxed) {
+            break;
+        }
+        writeln!(log.lock().expect("log lock"), "Importing: {}", path.display())?;
+        out.reached[i] = true;
+        out.sizes[i] = std::fs::metadata(path)?.len();
         let reader = open_input(path)?;
         let mut chunker = Chunker::new(reader, opts.chunk_bytes);
         while let Some(chunk) = chunker.next_chunk()? {
@@ -495,23 +571,24 @@ fn reader_loop(
                 break 'files;
             }
             let (chunk, skipped_now, exhausted) = window(chunk, &mut skip, &mut limit);
-            skipped[i] += skipped_now;
+            out.skipped[i] += skipped_now;
             if let Some(chunk) = chunk
                 && tx.send((i, chunk)).is_err()
             {
                 break 'files;
             }
             if exhausted {
-                hit_limit = true;
+                out.hit_limit = true;
                 break 'files;
             }
         }
     }
-    Ok((skipped, sizes, hit_limit))
+    Ok(out)
 }
 
-/// Run an import. Progress and warnings go to `log`.
-pub fn import(opts: &ImportOptions, log: &mut dyn Write) -> Result<ImportReport> {
+/// Run an import. Progress and warnings go to `log`: one `Importing:`
+/// line as each file is opened, then a count every 100,000 lines.
+pub fn import(opts: &ImportOptions, log: &mut (dyn Write + Send)) -> Result<ImportReport> {
     if opts.inputs.is_empty() {
         return Err(Error::Usage("at least one input file is required".into()));
     }
@@ -552,12 +629,13 @@ pub fn import(opts: &ImportOptions, log: &mut dyn Write) -> Result<ImportReport>
 
     let cfg = WorkerCfg {
         text_key: opts.text_key.clone(),
-        source_key: opts.source_key.clone(),
+        source_key: if opts.source.is_some() { String::new() } else { opts.source_key.clone() },
         extra: opts.extra.clone(),
         max_len: opts.max_len,
         keep_raw: opts.rejects.is_some() || opts.on_error == OnError::Abort,
     };
     let stop = AtomicBool::new(false);
+    let log: Log<'_> = Mutex::new(log);
     let (chunk_tx, chunk_rx) = bounded::<(usize, Chunk)>(workers * 2);
     let (res_tx, res_rx) = bounded::<ChunkResult>(workers * 4);
 
@@ -574,12 +652,13 @@ pub fn import(opts: &ImportOptions, log: &mut dyn Write) -> Result<ImportReport>
         abort: None,
         last_progress: 0,
         started,
-        log,
+        log: &log,
     };
 
     let (writer_result, reader_result) = std::thread::scope(|s| {
         let stop_ref = &stop;
-        let reader = s.spawn(move || reader_loop(opts, &chunk_tx, stop_ref));
+        let log_ref = &log;
+        let reader = s.spawn(move || reader_loop(opts, &chunk_tx, stop_ref, log_ref));
         for _ in 0..workers {
             let rx: Receiver<(usize, Chunk)> = chunk_rx.clone();
             let tx = res_tx.clone();
@@ -621,15 +700,22 @@ pub fn import(opts: &ImportOptions, log: &mut dyn Write) -> Result<ImportReport>
     });
     writer_result?;
     flush_result?;
-    let (skipped, sizes, hit_limit) = reader_result?;
+    let files = reader_result?;
     if let Some(e) = writer.abort.take() {
         return Err(e);
     }
 
+    let totals = writer.counts.iter().fold(Counts::default(), |mut a, c| {
+        a.add(c);
+        a
+    });
+    let removed_sources =
+        if opts.dry_run || totals.replaced + totals.updated == 0 { Vec::new() } else { store::prune_sources(store.as_ref())? };
     let mut report = ImportReport {
+        removed_sources,
         elapsed: started.elapsed(),
         bytes: writer.bytes,
-        stopped_at_limit: hit_limit,
+        stopped_at_limit: files.hit_limit,
         dry_run: opts.dry_run,
         has_store: !opts.dry_run,
         approx_docs: store.approx_count()?,
@@ -640,10 +726,10 @@ pub fn import(opts: &ImportOptions, log: &mut dyn Write) -> Result<ImportReport>
     };
     for (i, path) in opts.inputs.iter().enumerate() {
         let mut counts = writer.counts[i].clone();
-        counts.lines += skipped[i];
-        counts.skipped = skipped[i];
+        counts.lines += files.skipped[i];
+        counts.skipped = files.skipped[i];
         report.totals.add(&counts);
-        report.files.push(FileReport { path: path.clone(), counts, bytes: sizes[i] });
+        report.files.push(FileReport { path: path.clone(), counts, bytes: files.sizes[i], reached: files.reached[i] });
     }
     Ok(report)
 }
@@ -656,7 +742,7 @@ mod tests {
         WorkerCfg {
             text_key: "text".into(),
             source_key: "source".into(),
-            extra: vec!["year".into(), "title".into()],
+            extra: parse_extra(&["year".into(), "title".into()]).unwrap(),
             max_len: 10_000,
             keep_raw: true,
         }
@@ -734,7 +820,8 @@ mod tests {
 
     #[test]
     fn counts_balance() {
-        let mut c = Counts { lines: 10, skipped: 2, empty: 1, dropped: [1, 0, 0, 1, 0, 0, 0], duplicates: 1, replaced: 1, indexed: 3 };
+        let mut c =
+            Counts { lines: 10, skipped: 2, empty: 1, dropped: [1, 0, 0, 1, 0, 0, 0], duplicates: 1, replaced: 1, updated: 0, indexed: 3 };
         assert!(c.balanced());
         assert_eq!(c.loaded(), 7);
         assert_eq!(c.dropped_total(), 2);
@@ -743,6 +830,22 @@ mod tests {
         assert!(c.balanced());
         c.indexed += 1;
         assert!(!c.balanced());
+    }
+
+    #[test]
+    fn extra_keys_and_renames() {
+        let p = |items: &[&str]| parse_extra(&items.iter().map(|s| s.to_string()).collect::<Vec<_>>());
+        let got = p(&["year", "Publication=title", " titleCode = pubID "]).unwrap();
+        let want = [("year", "year"), ("Publication", "title"), ("titleCode", "pubID")];
+        assert_eq!(got, want.map(|(a, b)| (a.to_string(), b.to_string())));
+        for bad in [&["=x"][..], &["x="], &["a=b=c"], &[""], &["a", "a=b"], &["a=t", "b=t"], &["title", "Publication=title"]] {
+            assert!(matches!(p(bad), Err(Error::Usage(_))), "{bad:?}");
+        }
+        let mut sc = Scratch::default();
+        let c = WorkerCfg { extra: p(&["Publication=title", "year"]).unwrap(), ..cfg() };
+        let line = format!("{{\"text\": \"{GOOD}\", \"year\": 1700, \"title\": \"ignored\", \"Publication\": \"Gazette\"}}");
+        let doc = process_line(line.as_bytes(), &c, &mut sc).unwrap().unwrap();
+        assert_eq!(doc.extra.as_deref(), Some("{\"year\":1700,\"title\":\"Gazette\"}"));
     }
 
     #[test]
@@ -766,7 +869,8 @@ mod tests {
     fn writer_handles_prefix_collisions_and_in_batch_replace() {
         let store = crate::store::NullStore::default();
         let opts = ImportOptions::new("x".into(), vec!["in.jsonl".into()]);
-        let mut log = Vec::new();
+        let mut sink = Vec::new();
+        let log: Log<'_> = Mutex::new(&mut sink);
         let mut w = Writer {
             store: &store,
             opts: &opts,
@@ -780,7 +884,7 @@ mod tests {
             abort: None,
             last_progress: 0,
             started: Instant::now(),
-            log: &mut log,
+            log: &log,
         };
         let mut sc = Scratch::default();
         let mk = |text: &str, sc: &mut Scratch| {
@@ -819,16 +923,19 @@ mod tests {
         let mut counts = Counts { lines: 5, skipped: 1, empty: 1, indexed: 2, ..Default::default() };
         counts.dropped[DropReason::BadJson.index()] = 1;
         rep.totals.add(&counts);
-        rep.files.push(FileReport { path: "a.jsonl".into(), counts, bytes: 4_000_000 });
+        rep.files.push(FileReport { path: "a.jsonl".into(), counts, bytes: 4_000_000, reached: true });
+        rep.files.push(FileReport { path: "b.jsonl".into(), ..Default::default() });
         let s = rep.render();
-        assert!(s.contains("File: a.jsonl"));
+        assert!(s.contains("Imported: a.jsonl\n  Lines:"), "{s}");
+        assert!(s.contains("Not reached: b.jsonl\nTotals:"), "an unopened file gets no counts: {s}");
         assert!(s.contains("bad_json 1"));
         assert!(s.contains("2.0 MB/s"));
         assert!(s.contains("Stopped at --limit"));
         assert!(s.contains("Store: about 0 documents"));
         let empty = ImportReport::default().render();
         assert!(empty.contains("Totals: 0 lines"));
-        let none = ImportReport { files: vec![FileReport::default()], dry_run: true, ..Default::default() }.render();
+        let none =
+            ImportReport { files: vec![FileReport { reached: true, ..Default::default() }], dry_run: true, ..Default::default() }.render();
         assert!(none.contains("(none)") && none.contains("Dry run"));
     }
 }

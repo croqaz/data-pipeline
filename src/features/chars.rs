@@ -43,10 +43,14 @@ impl CharFreq {
 pub struct CharStats {
     /// Distinct Unicode scalar values.
     pub uniq: u32,
-    /// Order-0 Shannon entropy of the scalar distribution, in hundredths of
-    /// a bit per character (English prose sits around 4.1 to 4.6 bits).
+    /// Order-0 Shannon entropy of the scalar distribution as basis points
+    /// of [`ENTROPY_NORM`] bits per character: 10000 is 4.47 bits.
     pub entropy: u16,
 }
+
+/// Bits per character that count as 100% entropy: set so the median document
+/// of the clean Vintage-1 store (1.14 M documents) reads about 99.5.
+pub const ENTROPY_NORM: f64 = 4.47;
 
 /// Distinct characters and entropy of `text` in one pass.
 ///
@@ -75,7 +79,7 @@ pub fn char_stats(text: &str, freq: &mut CharFreq) -> CharStats {
         let sum: f64 = freq.counts.iter().map(|&c| f64::from(c) * f64::from(c).log2()).sum();
         ((n as f64).log2() - sum / n as f64).max(0.0)
     };
-    CharStats { uniq, entropy: (entropy * 100.0).round().min(65_535.0) as u16 }
+    CharStats { uniq, entropy: (entropy / ENTROPY_NORM * 10_000.0).round().min(65_535.0) as u16 }
 }
 
 /// Number of distinct Unicode scalar values in `text`.
@@ -123,13 +127,13 @@ mod tests {
         let mut f = CharFreq::default();
         assert_eq!(char_stats("", &mut f).entropy, 0);
         assert_eq!(char_stats("aaaaaaaa", &mut f).entropy, 0, "one symbol: zero bits");
-        assert_eq!(char_stats("abababab", &mut f).entropy, 100, "two equiprobable symbols: one bit");
-        assert_eq!(char_stats("abcd", &mut f).entropy, 200);
-        assert_eq!(char_stats("日本日本", &mut f).entropy, 100, "non-Latin text takes the same path");
+        assert_eq!(char_stats("abababab", &mut f).entropy, 2237, "two equiprobable symbols: one bit is 22.37% of 4.47");
+        assert_eq!(char_stats("abcd", &mut f).entropy, 4474, "two bits");
+        assert_eq!(char_stats("日本日本", &mut f).entropy, 2237, "non-Latin text takes the same path");
         // 1/2, 1/4, 1/4 -> 1.5 bits
-        assert_eq!(char_stats("aabc", &mut f).entropy, 150);
+        assert_eq!(char_stats("aabc", &mut f).entropy, 3356);
         let prose = char_stats("The quick brown fox jumps over the lazy dog and keeps running through the night.", &mut f);
-        assert!((380..460).contains(&prose.entropy), "{}", prose.entropy);
+        assert!((8_600..10_500).contains(&prose.entropy), "{}", prose.entropy);
         assert_eq!(prose.uniq, uniq_chars("The quick brown fox jumps over the lazy dog and keeps running through the night.", &mut f));
         // order of first occurrence does not matter
         assert_eq!(char_stats("aab", &mut f).entropy, char_stats("baa", &mut f).entropy);

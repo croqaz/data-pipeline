@@ -369,8 +369,13 @@ mod tests {
             alpha: 9500,
             flags: 1,
             dict_hit: Some(8000),
-            entropy: Some(425),
+            entropy: Some(9660),
             compress: Some(5800),
+            top4gram: None,
+            dup5gram: None,
+            dup10gram: None,
+            mean_word_len: None,
+            stop_words: None,
         };
         let key = [0xabu8; 16];
         let extra = br#"{"year": 1842, "title": "The \"Raven\"", "ok": true, "none": null, "tags": ["a", 1], "obj": {"k": 2}}"#;

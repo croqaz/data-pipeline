@@ -57,9 +57,24 @@ pub fn fetch(store: &dyn Store, key: &Key) -> Result<Document> {
     Ok(Document { key: *key, meta, text, extra })
 }
 
+/// How much of the text to print.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Clip {
+    Full,
+    /// The first N characters.
+    Head(usize),
+    /// The first and last N characters when the text has more than 2N.
+    Ends(usize),
+}
+
 /// Human layout: header lines, then the text after a rule. `head` limits
 /// the text to its first N characters.
 pub fn render(doc: &Document, sources: &Sources, head: Option<usize>) -> String {
+    render_clipped(doc, sources, head.map_or(Clip::Full, Clip::Head))
+}
+
+/// [`render`] with any [`Clip`].
+pub fn render_clipped(doc: &Document, sources: &Sources, clip: Clip) -> String {
     let mut s = String::new();
     s.push_str(&format!("id:        {}\n", key_to_hex(&doc.key)));
     s.push_str(&format!("source:    {}\n", sources.name(doc.meta.source)));
@@ -73,11 +88,21 @@ pub fn render(doc: &Document, sources: &Sources, head: Option<usize>) -> String 
     }
     let chars = doc.text.chars().count();
     s.push_str(&format!("--- text ({} chars) ---\n", fmt_int(chars as u64)));
-    match head {
-        Some(n) if n < chars => {
+    match clip {
+        Clip::Head(n) if n < chars => {
             let cut: String = doc.text.chars().take(n).collect();
             s.push_str(&cut);
             s.push_str(&format!("\n... [{} more chars]\n", fmt_int((chars - n) as u64)));
+        }
+        Clip::Ends(n) if chars > 2 * n => {
+            let first: String = doc.text.chars().take(n).collect();
+            let last: String = doc.text.chars().skip(chars - n).collect();
+            s.push_str(&first);
+            s.push_str(&format!("\n... [{} chars cut] ...\n", fmt_int((chars - 2 * n) as u64)));
+            s.push_str(&last);
+            if !last.ends_with('\n') {
+                s.push('\n');
+            }
         }
         _ => {
             s.push_str(&doc.text);
@@ -162,12 +187,20 @@ mod tests {
         sources.intern("cli", store.as_ref()).unwrap();
         let doc = fetch(store.as_ref(), &[1u8; 16]).unwrap();
         let s = render(&doc, &sources, None);
-        assert!(s.starts_with("id:        01010101010101010101010101010101\nsource:    cli\nfeatures:  len 0  bytes 0  words 3"), "{s}");
+        assert!(
+            s.starts_with("id:        01010101010101010101010101010101\nsource:    cli\nfeatures:  len 0  bytes 0  uniqChars 0  words 3"),
+            "{s}"
+        );
         assert!(s.ends_with("--- text (7 chars) ---\nHello.\n"), "{s}");
         assert!(!s.contains("extra:"));
         let s = render(&doc, &sources, Some(3));
         assert!(s.ends_with("--- text (7 chars) ---\nHel\n... [4 more chars]\n"), "{s}");
         assert!(render(&doc, &sources, Some(7)).ends_with("Hello.\n"));
+        assert_eq!(render_clipped(&doc, &sources, Clip::Ends(4)), render(&doc, &sources, None), "7 chars is not over 2 x 4");
+        let long = Document { text: "abcdefghij".into(), ..fetch(store.as_ref(), &[1u8; 16]).unwrap() };
+        assert!(render_clipped(&long, &sources, Clip::Ends(3)).ends_with("--- text (10 chars) ---\nabc\n... [4 chars cut] ...\nhij\n"));
+        let long = Document { text: "abcdefgh\n".into(), ..long };
+        assert!(render_clipped(&long, &sources, Clip::Ends(2)).ends_with("ab\n... [5 chars cut] ...\nh\n"));
         let json = render_json(&doc, &sources).unwrap();
         let v: serde_json::Value = serde_json::from_str(&json).unwrap();
         assert_eq!(v["words"], 3);

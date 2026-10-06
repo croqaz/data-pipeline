@@ -7,7 +7,9 @@
 //! absent against the `has_extra` flag, and source ids without a label.
 //! `--deep` also reads every text and checks that it is UTF-8, that its
 //! BLAKE3 key matches, and that the stored features equal a fresh
-//! computation (so a changed scanner shows up as "stale").
+//! computation (so a changed scanner shows up as "stale"). Its only write:
+//! after a pass with no corrupt meta, source names no document uses are
+//! removed.
 
 use std::iter::Peekable;
 use std::time::Instant;
@@ -17,7 +19,7 @@ use crate::features;
 use crate::hash::{Key, doc_key, key_to_hex};
 use crate::meta::Meta;
 use crate::stats::range_for;
-use crate::store::{Keyspace, KvIter, Sources, Store};
+use crate::store::{self, Keyspace, KvIter, Sources, Store};
 use crate::util::{fmt_int, fmt_num};
 
 #[derive(Debug, Clone)]
@@ -93,6 +95,8 @@ pub struct Acc {
     pub extra: u64,
     pub counts: [u64; 10],
     pub examples: Vec<(Problem, Key)>,
+    /// Source ids that some decodable meta uses.
+    pub used_sources: Vec<bool>,
     max_examples: usize,
 }
 
@@ -119,6 +123,11 @@ impl Acc {
         for (a, b) in self.counts.iter_mut().zip(&o.counts) {
             *a += b;
         }
+        for (i, u) in o.used_sources.iter().enumerate() {
+            if *u {
+                store::mark_used(&mut self.used_sources, i as u16);
+            }
+        }
         for (p, k) in &o.examples {
             if self.examples.iter().filter(|(q, _)| q == p).count() < self.max_examples {
                 self.examples.push((*p, *k));
@@ -131,6 +140,8 @@ impl Acc {
 pub struct CheckReport {
     pub acc: Acc,
     pub sources: usize,
+    /// Source names no document used, removed by this check.
+    pub removed_sources: Vec<String>,
     pub deep: bool,
     pub secs: f64,
 }
@@ -163,6 +174,9 @@ impl CheckReport {
             self.sources,
             if self.sources == 1 { "" } else { "s" }
         ));
+        if !self.removed_sources.is_empty() {
+            s.push_str(&format!("  Unused sources removed: {}\n", self.removed_sources.join(", ")));
+        }
         for p in Problem::ALL {
             let c = self.acc.counts[p.index()];
             if c == 0 && (p.is_deep() && !self.deep) {
@@ -264,6 +278,7 @@ fn check_range(store: &dyn Store, sources: &Sources, opts: &CheckOptions, lo: &K
                 (false, true) => acc.problem(Problem::MissingExtra, key),
                 _ => {}
             }
+            store::mark_used(&mut acc.used_sources, m.source);
             if sources.name(m.source) == "?" {
                 acc.problem(Problem::UnknownSource, key);
             }
@@ -291,7 +306,11 @@ pub fn check(store: &dyn Store, sources: &Sources, opts: &CheckOptions) -> Resul
     for r in results {
         acc.merge(&r?);
     }
-    Ok(CheckReport { acc, sources: sources.len(), deep: opts.deep, secs: t0.elapsed().as_secs_f64() })
+    // A corrupt meta may still point at a name, so only a clean pass prunes.
+    let removed_sources =
+        if acc.counts[Problem::CorruptMeta.index()] == 0 { store::remove_unused_sources(store, &acc.used_sources)? } else { Vec::new() };
+    let sources = sources.len() - removed_sources.len();
+    Ok(CheckReport { acc, sources, removed_sources, deep: opts.deep, secs: t0.elapsed().as_secs_f64() })
 }
 
 /// The error a failed check turns into, after the report is printed.
@@ -421,9 +440,35 @@ How vexingly quick daft zebras jump. The five boxing wizards jump quickly.";
         assert_eq!(count(&deep, Problem::StaleFeatures), 2);
         assert!(deep.render().contains("stale features:                    2"), "{}", deep.render());
         assert_eq!(failure(&deep).to_string(), "store error: check found 17 problems");
-        let one = CheckReport { acc: Acc { counts: [1, 0, 0, 0, 0, 0, 0, 0, 0, 0], ..Acc::new(1) }, sources: 1, deep: false, secs: 0.0 };
+        let one = CheckReport {
+            acc: Acc { counts: [1, 0, 0, 0, 0, 0, 0, 0, 0, 0], ..Acc::new(1) },
+            sources: 1,
+            removed_sources: vec![],
+            deep: false,
+            secs: 0.0,
+        };
         assert!(one.render().starts_with("Check: 1 problem in 0 documents"), "{}", one.render());
         assert_eq!(failure(&one).to_string(), "store error: check found 1 problem");
+    }
+
+    #[test]
+    fn clean_check_removes_unused_source_names() {
+        let (_dir, store, mut sources) = fresh_store();
+        sources.intern("gone", store.as_ref()).unwrap();
+        let used = sources.intern("kept", store.as_ref()).unwrap();
+        store.put_batch(&[doc(1, None, used), doc(2, None, used)]).unwrap();
+        store.persist().unwrap();
+        let rep = check(store.as_ref(), &sources, &CheckOptions { deep: false, threads: 2, examples: 5 }).unwrap();
+        assert_eq!(rep.removed_sources, vec!["cli", "gone"]);
+        assert_eq!(rep.sources, 1);
+        assert!(rep.render().contains("1 source label\n  Unused sources removed: cli, gone\n"), "{}", rep.render());
+        assert_eq!(store.sources().unwrap(), vec![(used, "kept".to_string())]);
+        // a corrupt meta might name any source: nothing is removed
+        sources.intern("other", store.as_ref()).unwrap();
+        store.put_raw(Keyspace::Meta, &[0x10; 16], Some(b"\xff")).unwrap();
+        let rep = check(store.as_ref(), &sources, &CheckOptions { deep: false, threads: 1, examples: 5 }).unwrap();
+        assert!(rep.removed_sources.is_empty());
+        assert_eq!(store.sources().unwrap().len(), 2);
     }
 
     #[test]

@@ -253,7 +253,7 @@ fn write_feature(out: &mut Vec<u8>, idx: usize, raw: u64) {
         Kind::Int => {
             let _ = write!(out, "{raw}");
         }
-        Kind::Pct | Kind::Bits => {
+        Kind::Pct => {
             let _ = write!(out, "{:.2}", def.present(raw as f64));
         }
     }
@@ -283,8 +283,13 @@ mod tests {
             alpha: 5000,
             flags: 1,
             dict_hit: None,
-            entropy: Some(412),
+            entropy: Some(9360),
             compress: Some(6150),
+            top4gram: None,
+            dup5gram: None,
+            dup10gram: None,
+            mean_word_len: None,
+            stop_words: None,
         }
     }
 

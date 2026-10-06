@@ -1,0 +1,26 @@
+# English stopwords for the `stopWords` feature: words separated by whitespace, folded
+# the way `uniqWords` folds (ASCII lowercase, curly apostrophe to ').
+# Lines starting with # are comments. Chosen from word frequencies of
+# Vintage-1 by period (research/REPORT-stopwords-2026-10-05.md): function
+# words only, never topic words, even frequent ones like "house" or "god".
+
+# Modern function words: articles, pronouns, prepositions, conjunctions,
+# auxiliaries, determiners.
+a about above after again against all also am among an and another any are as at
+be because been before being below between both but by
+can cannot could did do does doing down during each either every few for from further
+had has have having he her here hers herself him himself his how however
+i if in into is it its itself just may me might mine more most much must my myself
+neither no nor not now of off on once one only or other others ought our ours ourselves out over own
+same shall she should since so some such
+than that the their theirs them themselves then there therefore these they this those though through thus to too
+under until unto up upon us very was we were what whatever when where whether which while who whom whose why
+will with within without would yet you your yours yourself yourselves
+
+# Early modern forms, common in EEBO-TCP and rare later.
+thou thee thy thine ye hath doth hast dost art shalt wilt didst canst wouldst shouldst mayst saith
+whilst amongst ere oft thereof whereof wherein whereby therein thereby
+hither thither hence thence whence wherefore albeit lest tis twas tho
+
+# Early modern spellings of the words above (u/v, doubled e).
+haue vnto vpon doe hee shee wee mee bee vs vp euery ouer onely yt ys

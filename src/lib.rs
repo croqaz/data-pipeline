@@ -17,6 +17,8 @@ pub mod import;
 pub mod info;
 pub mod jsonl;
 pub mod meta;
+pub mod query;
+pub mod recompute;
 pub mod show;
 pub mod stats;
 pub mod store;
@@ -29,7 +31,8 @@ use std::process::ExitCode;
 use clap::Parser;
 
 use cli::{
-    CheckArgs, Cli, Command, CompactArgs, CountArgs, DeleteArgs, ExploreArgs, ExportArgs, ImportArgs, InfoArgs, ShowArgs, StatsArgs,
+    CheckArgs, Cli, Command, CompactArgs, CountArgs, DeleteArgs, ExploreArgs, ExportArgs, ImportArgs, InfoArgs, QueryArgs, RecomputeArgs,
+    ShowArgs, StatsArgs,
 };
 use error::{Error, Result};
 
@@ -46,8 +49,10 @@ where
     ExitCode::from(code)
 }
 
-/// Run the CLI with explicit output streams and stdin for prompts.
-pub fn run_with<I, T>(args: I, out: &mut dyn Write, err: &mut dyn Write) -> u8
+/// Run the CLI with explicit output streams and stdin for prompts. `err`
+/// must be `Send` because import and recompute print progress from their
+/// worker threads.
+pub fn run_with<I, T>(args: I, out: &mut dyn Write, err: &mut (dyn Write + Send)) -> u8
 where
     I: IntoIterator<Item = T>,
     T: Into<OsString> + Clone,
@@ -56,7 +61,7 @@ where
 }
 
 /// Run the CLI with explicit streams; `input` answers confirmation prompts.
-pub fn run_with_input<I, T>(args: I, input: &mut dyn BufRead, out: &mut dyn Write, err: &mut dyn Write) -> u8
+pub fn run_with_input<I, T>(args: I, input: &mut dyn BufRead, out: &mut dyn Write, err: &mut (dyn Write + Send)) -> u8
 where
     I: IntoIterator<Item = T>,
     T: Into<OsString> + Clone,
@@ -81,11 +86,12 @@ where
     }
 }
 
-pub fn run_cli(cli: Cli, input: &mut dyn BufRead, out: &mut dyn Write, err: &mut dyn Write) -> Result<()> {
+pub fn run_cli(cli: Cli, input: &mut dyn BufRead, out: &mut dyn Write, err: &mut (dyn Write + Send)) -> Result<()> {
     match cli.cmd {
         Command::Import(a) => cmd_import(a, out, err),
         Command::Stats(a) => cmd_stats(a, out),
         Command::Count(a) => cmd_count(a, out),
+        Command::Query(a) => cmd_query(a, out, err),
         Command::Export(a) => cmd_export(a, out, err),
         Command::Check(a) => cmd_check(a, out),
         Command::Info(a) => cmd_info(a, out),
@@ -93,6 +99,7 @@ pub fn run_cli(cli: Cli, input: &mut dyn BufRead, out: &mut dyn Write, err: &mut
         Command::Compact(a) => cmd_compact(a, out),
         Command::Delete(a) => cmd_delete(a, input, out, err),
         Command::Explore(a) => cmd_explore(a, out),
+        Command::Recompute(a) => cmd_recompute(a, out, err),
     }
 }
 
@@ -100,12 +107,12 @@ fn threads(requested: Option<usize>) -> usize {
     requested.unwrap_or_else(|| std::thread::available_parallelism().map_or(4, |n| n.get())).max(1)
 }
 
-fn cmd_import(a: ImportArgs, out: &mut dyn Write, err: &mut dyn Write) -> Result<()> {
+fn cmd_import(a: ImportArgs, out: &mut dyn Write, err: &mut (dyn Write + Send)) -> Result<()> {
     let mut opts = import::ImportOptions::new(a.store.db, a.inputs);
     opts.source = a.source;
     opts.source_key = a.source_key;
     opts.text_key = a.text_key;
-    opts.extra = a.extra;
+    opts.extra = import::parse_extra(&a.extra)?;
     opts.max_len = a.max_len;
     opts.workers = threads(a.workers);
     opts.offset = a.offset;
@@ -145,6 +152,30 @@ fn cmd_count(a: CountArgs, out: &mut dyn Write) -> Result<()> {
     let cfg = stats::ScanConfig { filter: filter.as_ref(), threads: threads(a.threads), limit: None };
     let rep = count::count(store.as_ref(), &sources, &cfg)?;
     write!(out, "{}", rep.render())?;
+    Ok(())
+}
+
+fn cmd_query(a: QueryArgs, out: &mut dyn Write, err: &mut dyn Write) -> Result<()> {
+    let store = store::open(&a.store.db, false)?;
+    let sources = store::Sources::load(store.as_ref())?;
+    let filter = compile_opt(a.expr.as_deref())?;
+    let sort = a.sort.as_deref().map(|s| query::SortBy::parse(s, a.asc)).transpose()?;
+    let start = a.random.then(|| {
+        query::start_key(a.seed.unwrap_or_else(|| std::hash::BuildHasher::hash_one(&std::collections::hash_map::RandomState::new(), 0u8)))
+    });
+    let opts = query::QueryOptions { limit: a.limit, sort, start, threads: threads(a.threads) };
+    let sel = query::select(store.as_ref(), &sources, filter.as_ref(), &opts)?;
+    let output = if a.ids {
+        query::Output::Ids
+    } else if a.json {
+        query::Output::Json
+    } else if a.full {
+        query::Output::Readable(show::Clip::Full)
+    } else {
+        query::Output::Readable(a.head.map_or(show::Clip::Ends(query::DEFAULT_ENDS), show::Clip::Head))
+    };
+    query::print(store.as_ref(), &sources, &sel, sort, output, out)?;
+    write!(err, "{}", query::summary(&sel, &opts))?;
     Ok(())
 }
 
@@ -285,5 +316,19 @@ fn cmd_explore(a: ExploreArgs, out: &mut dyn Write) -> Result<()> {
     write!(out, "{}", explore::banner(&server)?)?;
     out.flush()?;
     server.serve(explore::WORKERS);
+    Ok(())
+}
+
+fn cmd_recompute(a: RecomputeArgs, out: &mut dyn Write, err: &mut (dyn Write + Send)) -> Result<()> {
+    let store = store::open(&a.store.db, false)?;
+    let opts = recompute::RecomputeOptions {
+        threads: threads(a.threads),
+        batch_size: a.batch_size.max(1),
+        dry_run: a.dry_run,
+        force: a.force,
+        progress_every: recompute::PROGRESS_EVERY,
+    };
+    let rep = recompute::recompute(store.as_ref(), &opts, err)?;
+    write!(out, "{}", rep.render())?;
     Ok(())
 }

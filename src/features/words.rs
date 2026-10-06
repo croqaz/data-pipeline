@@ -17,20 +17,60 @@ pub struct WordStats {
     pub uniq_words: u32,
     pub alpha_words: u32,
     pub vowel_words: u32,
+    /// Characters in all words (after trimming), for `meanWordLen`.
+    pub word_chars: u64,
+    /// Words in [`STOPWORDS`].
+    pub stop_words: u32,
 }
 
-/// Scratch reused across documents: the distinct-word set and a lowercase
-/// buffer. Word hashes are 64-bit and already uniform, so the set uses an
+/// The stopword list: whitespace-separated words, `#` comments.
+pub const STOPWORDS: &str = include_str!("stopwords.txt");
+
+/// The stopwords as word hashes, made with the same hasher `scan_words`
+/// uses for every folded word, so membership is one set lookup.
+static STOP_SET: std::sync::LazyLock<HashSet<u64, IdentityBuild>> = std::sync::LazyLock::new(|| {
+    let hasher = foldhash::fast::FixedState::default();
+    stopword_list().map(|w| hasher.hash_one(w.as_bytes())).collect()
+});
+
+/// The words of [`STOPWORDS`], comments removed.
+pub fn stopword_list() -> impl Iterator<Item = &'static str> {
+    STOPWORDS.lines().filter(|l| !l.trim_start().starts_with('#')).flat_map(str::split_whitespace)
+}
+
+/// Scratch reused across documents: the distinct-word set, a lowercase
+/// buffer, and the hash and length of every word in order (for the n-gram
+/// scanner). Word hashes are 64-bit and already uniform, so the set uses an
 /// identity hasher.
 pub struct WordScratch {
     set: HashSet<u64, IdentityBuild>,
     lower: Vec<u8>,
     hasher: foldhash::fast::FixedState,
+    hashes: Vec<u64>,
+    lens: Vec<u32>,
+}
+
+impl WordScratch {
+    /// Hash of each folded word of the last scanned text, in order.
+    pub fn hashes(&self) -> &[u64] {
+        &self.hashes
+    }
+
+    /// Length in characters of each word of the last scanned text.
+    pub fn lens(&self) -> &[u32] {
+        &self.lens
+    }
 }
 
 impl Default for WordScratch {
     fn default() -> Self {
-        Self { set: HashSet::with_hasher(IdentityBuild), lower: Vec::with_capacity(64), hasher: foldhash::fast::FixedState::default() }
+        Self {
+            set: HashSet::with_hasher(IdentityBuild),
+            lower: Vec::with_capacity(64),
+            hasher: foldhash::fast::FixedState::default(),
+            hashes: Vec::new(),
+            lens: Vec::new(),
+        }
     }
 }
 
@@ -113,27 +153,164 @@ fn fold_lower(tok: &str, out: &mut Vec<u8>) {
     }
 }
 
+const OTHER: u8 = 0;
+const SPACE: u8 = 1;
+const ALNUM: u8 = 2;
+
+/// Class of each ASCII byte. `SPACE` is Unicode `White_Space`: tab, LF, VT,
+/// FF, CR, space (0x1C to 0x1F are not, unlike Python's `isspace`).
+const ASCII_CLASS: [u8; 128] = {
+    let mut t = [OTHER; 128];
+    let mut b = 0;
+    while b < 128 {
+        if (b >= 0x09 && b <= 0x0D) || b == 0x20 {
+            t[b] = SPACE;
+        } else if (b as u8).is_ascii_alphanumeric() {
+            t[b] = ALNUM;
+        }
+        b += 1;
+    }
+    t
+};
+
+/// The character starting at byte `i`, which must be a char boundary.
+#[inline]
+fn char_at(text: &str, i: usize) -> char {
+    text[i..].chars().next().expect("i is inside the text")
+}
+
+/// Is the character starting at byte `i` whitespace? Returns the answer and
+/// its length in bytes. ASCII is a table lookup; only other bytes decode.
+#[inline]
+fn space_at(text: &str, i: usize) -> (bool, usize) {
+    let b = text.as_bytes()[i];
+    if b < 0x80 {
+        (ASCII_CLASS[b as usize] == SPACE, 1)
+    } else {
+        let c = char_at(text, i);
+        (is_space(c), c.len_utf8())
+    }
+}
+
+/// `tok` without leading and trailing non-alphanumeric characters.
+#[inline]
+fn trim_token(tok: &str) -> &str {
+    let b = tok.as_bytes();
+    let mut i = 0;
+    while i < b.len() {
+        if b[i] < 0x80 {
+            if b[i].is_ascii_alphanumeric() {
+                break;
+            }
+            i += 1;
+        } else {
+            let c = char_at(tok, i);
+            if c.is_alphanumeric() {
+                break;
+            }
+            i += c.len_utf8();
+        }
+    }
+    let mut j = b.len();
+    while j > i {
+        if b[j - 1] < 0x80 {
+            if b[j - 1].is_ascii_alphanumeric() {
+                break;
+            }
+            j -= 1;
+        } else {
+            let c = tok[..j].chars().next_back().expect("j > i");
+            if c.is_alphanumeric() {
+                break;
+            }
+            j -= c.len_utf8();
+        }
+    }
+    &tok[i..j]
+}
+
+/// One pass over the bytes. Tokens are the maximal runs between whitespace
+/// characters, as `text.split(is_space)` gives them; the work per byte is a
+/// table lookup unless the byte starts a non-ASCII character. The same pass
+/// notes the first and last ASCII letter or digit, so a token that is all
+/// ASCII (the usual case) is trimmed without a second look, folded with
+/// `to_ascii_lowercase`, and its length in characters is its length in
+/// bytes.
 pub fn scan_words(text: &str, scratch: &mut WordScratch) -> WordStats {
     let mut st = WordStats::default();
     scratch.set.clear();
-    for raw in text.split(is_space) {
-        if raw.is_empty() {
+    if scratch.hashes.capacity() > super::ngrams::BIG_DOC {
+        scratch.hashes = Vec::new();
+        scratch.lens = Vec::new();
+    }
+    scratch.hashes.clear();
+    scratch.lens.clear();
+    let bytes = text.as_bytes();
+    let n = bytes.len();
+    let mut i = 0;
+    while i < n {
+        // skip whitespace
+        let (space, w) = space_at(text, i);
+        if space {
+            i += w;
             continue;
         }
-        let tok = raw.trim_matches(|c: char| !c.is_alphanumeric());
+        // the token runs to the next whitespace character
+        let start = i;
+        let mut ascii = true;
+        let (mut first, mut last) = (usize::MAX, 0);
+        while i < n {
+            let b = bytes[i];
+            if b < 0x80 {
+                match ASCII_CLASS[b as usize] {
+                    SPACE => break,
+                    ALNUM => {
+                        first = first.min(i);
+                        last = i;
+                    }
+                    _ => {}
+                }
+                i += 1;
+            } else {
+                let c = char_at(text, i);
+                if is_space(c) {
+                    break;
+                }
+                ascii = false;
+                i += c.len_utf8();
+            }
+        }
+        let tok = match (ascii, first) {
+            (true, usize::MAX) => "",
+            (true, _) => &text[first..=last],
+            (false, _) => trim_token(&text[start..i]),
+        };
         if tok.is_empty() {
             continue;
         }
         st.words += 1;
-        fold_lower(tok, &mut scratch.lower);
+        let len = if ascii {
+            scratch.lower.clear();
+            scratch.lower.extend(tok.bytes().map(|b| b.to_ascii_lowercase()));
+            tok.len() as u32
+        } else {
+            fold_lower(tok, &mut scratch.lower);
+            scratch.lower.iter().filter(|&&b| (b as i8) >= -0x40).count() as u32
+        };
         let h = scratch.hasher.hash_one(&scratch.lower[..]);
+        scratch.hashes.push(h);
+        scratch.lens.push(len);
+        st.word_chars += u64::from(len);
+        if STOP_SET.contains(&h) {
+            st.stop_words += 1;
+        }
         if scratch.set.insert(h) {
             st.uniq_words += 1;
         }
-        let bytes = tok.as_bytes();
-        if is_alpha_word(bytes) {
+        let tb = tok.as_bytes();
+        if is_alpha_word(tb) {
             st.alpha_words += 1;
-            if has_vowel(bytes) {
+            if has_vowel(tb) {
                 st.vowel_words += 1;
             }
         }
@@ -148,6 +325,97 @@ mod tests {
     fn scan(s: &str) -> WordStats {
         let mut sc = WordScratch::default();
         scan_words(s, &mut sc)
+    }
+
+    /// The previous implementation, kept as the reference the fast path
+    /// must match exactly.
+    fn scan_reference(text: &str) -> (WordStats, Vec<u64>, Vec<u32>) {
+        let mut sc = WordScratch::default();
+        let mut st = WordStats::default();
+        for raw in text.split(is_space) {
+            if raw.is_empty() {
+                continue;
+            }
+            let tok = raw.trim_matches(|c: char| !c.is_alphanumeric());
+            if tok.is_empty() {
+                continue;
+            }
+            st.words += 1;
+            fold_lower(tok, &mut sc.lower);
+            let h = sc.hasher.hash_one(&sc.lower[..]);
+            sc.hashes.push(h);
+            let len = sc.lower.iter().filter(|&&b| (b as i8) >= -0x40).count() as u32;
+            sc.lens.push(len);
+            st.word_chars += u64::from(len);
+            if STOP_SET.contains(&h) {
+                st.stop_words += 1;
+            }
+            if sc.set.insert(h) {
+                st.uniq_words += 1;
+            }
+            let bytes = tok.as_bytes();
+            if is_alpha_word(bytes) {
+                st.alpha_words += 1;
+                if has_vowel(bytes) {
+                    st.vowel_words += 1;
+                }
+            }
+        }
+        (st, sc.hashes, sc.lens)
+    }
+
+    fn scan_full(text: &str) -> (WordStats, Vec<u64>, Vec<u32>) {
+        let mut sc = WordScratch::default();
+        let st = scan_words(text, &mut sc);
+        (st, sc.hashes.clone(), sc.lens.clone())
+    }
+
+    /// Pieces chosen to hit every branch: ASCII and Unicode whitespace, the
+    /// C0 separators that are not whitespace, punctuation to trim on either
+    /// side, curly quotes, accents, CJK, emoji, non-ASCII punctuation.
+    const PIECES: &[&str] = &[
+        "a", "The", "WORD", "don't", "don’t", "x9", "42", " ", "  ", "\t", "\n", "\r\n", "\u{0b}", "\u{0c}", "\u{1c}", "\u{1f}", "\u{85}",
+        "\u{a0}", "\u{1680}", "\u{2003}", "\u{2028}", "\u{202f}", "\u{3000}", "\u{feff}", "\u{200b}", ".", ",", "--", "(", ")", "\"", "“",
+        "”", "‘", "’", "…", "—", "«", "»", "¿", "é", "café", "naïve", "ſ", "ﬁ", "日本", "語", "😀", "Ⅻ", "²", "_", "#", "'",
+    ];
+
+    proptest::proptest! {
+        #[test]
+        fn fast_path_matches_the_reference(idx in proptest::collection::vec(0..PIECES.len(), 0..40)) {
+            let text: String = idx.iter().map(|&i| PIECES[i]).collect();
+            proptest::prop_assert_eq!(scan_full(&text), scan_reference(&text));
+        }
+
+        #[test]
+        fn fast_path_matches_on_any_string(text in "\\PC{0,60}") {
+            proptest::prop_assert_eq!(scan_full(&text), scan_reference(&text));
+        }
+    }
+
+    #[test]
+    fn fast_path_matches_on_samples() {
+        for s in ["", " ", "a", "...", " .a. ", "\u{a0}x\u{a0}", "é", "’tis", "o’", "x\u{1c}y", "日本 語", "a\u{3000}b", "--é--"] {
+            assert_eq!(scan_full(s), scan_reference(s), "{s:?}");
+        }
+    }
+
+    #[test]
+    fn word_lengths_and_stopwords() {
+        let st = scan("The quick, brown fox -- jumps (over) the lazy dog.");
+        // the quick brown fox jumps over the lazy dog: 3+5+5+3+5+4+3+4+3
+        assert_eq!((st.words, st.word_chars), (9, 35));
+        // the, over, the
+        assert_eq!(st.stop_words, 3);
+        let early = scan("Thou hast not ſeene what I haue, vnto THEE ’tis giuen");
+        // thou hast not what i haue vnto thee tis (giuen and ſeene are not)
+        assert_eq!(early.stop_words, 9, "{early:?}");
+        assert_eq!(scan("café naïve").word_chars, 9, "characters, not bytes");
+        let list: Vec<&str> = stopword_list().collect();
+        assert!(list.contains(&"the") && list.contains(&"hath") && list.contains(&"vpon"));
+        assert!(!list.iter().any(|w| w.starts_with('#') || w.chars().any(|c| c.is_ascii_uppercase())));
+        let unique: std::collections::HashSet<&&str> = list.iter().collect();
+        assert_eq!(unique.len(), list.len(), "no duplicates");
+        assert_eq!(STOP_SET.len(), list.len());
     }
 
     #[test]

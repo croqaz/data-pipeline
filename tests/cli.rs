@@ -97,7 +97,7 @@ fn extra_fields_source_key_and_expressions() {
     ];
     let input = write(dir.path(), "in.jsonl", &lines);
     let db = dir.path().join("db");
-    let (code, out, err) = run(&["import", "--db", db.to_str().unwrap(), "-s", "default", "-e", "year,title", input.to_str().unwrap()]);
+    let (code, out, err) = run(&["import", "--db", db.to_str().unwrap(), "-e", "year,title", input.to_str().unwrap()]);
     assert_eq!(code, 0, "{err}");
     assert!(out.contains("Indexed:               3"), "{out}");
     let db = db.to_str().unwrap();
@@ -106,8 +106,8 @@ fn extra_fields_source_key_and_expressions() {
     assert_eq!(count("num(extra.year) > 1900"), "1 / 3 documents match (33.333%).\n");
     assert_eq!(count("has(extra.title)"), "2 / 3 documents match (66.667%).\n");
     assert_eq!(count("source == \"gut\""), "1 / 3 documents match (33.333%).\n");
-    assert_eq!(count("source == \"default\""), "2 / 3 documents match (66.667%).\n");
-    assert_eq!(count("source in [\"gut\", \"default\"]"), "3 / 3 documents match (100.000%).\n");
+    assert_eq!(count("source == \"cli\""), "2 / 3 documents match (66.667%).\n");
+    assert_eq!(count("source in [\"gut\", \"cli\"]"), "3 / 3 documents match (100.000%).\n");
     assert_eq!(count("extra.title.matches(\"^O\")"), "1 / 3 documents match (33.333%).\n");
     assert_eq!(count("has(extra.ignored)"), "0 / 3 documents match (0.000%).\n");
     assert_eq!(count("len(id) == 32"), "3 / 3 documents match (100.000%).\n");
@@ -263,8 +263,80 @@ fn compressed_inputs_and_multiple_files() {
     let db = dir.path().join("db");
     let (code, out, err) = run(&["import", "--db", db.to_str().unwrap(), plain.to_str().unwrap(), gz.to_str().unwrap()]);
     assert_eq!(code, 0, "{err}");
-    assert!(out.contains("File: ") && out.contains("b.jsonl.gz"), "{out}");
+    assert!(out.contains("Imported: ") && out.contains("b.jsonl.gz"), "{out}");
     assert!(out.contains("Totals: 3 lines, 3 indexed"), "{out}");
+    // each file is announced on stderr as it is opened, in order
+    let a = err.find("Importing: ").expect(&err);
+    let b = err.rfind("Importing: ").expect(&err);
+    assert!(a < b && err[a..b].contains("a.jsonl") && err[b..].contains("b.jsonl.gz"), "{err}");
+    // a limit that ends inside the first file leaves the second unopened
+    let db2 = dir.path().join("db2");
+    let (code, out, err) = run(&["import", "--db", db2.to_str().unwrap(), "--limit", "1", plain.to_str().unwrap(), gz.to_str().unwrap()]);
+    assert_eq!(code, 0, "{err}");
+    assert!(out.contains("Imported: ") && out.contains("a.jsonl\n"), "{out}");
+    assert!(out.contains("Not reached: ") && out.contains("b.jsonl.gz\n") && out.contains("Stopped at --limit"), "{out}");
+    assert_eq!(err.matches("Importing: ").count(), 1, "{err}");
+}
+
+#[test]
+fn recompute_refreshes_stale_features() {
+    use pipeline::meta::Meta;
+    use pipeline::store::Keyspace;
+    let dir = tempfile::tempdir().unwrap();
+    let input = write(dir.path(), "in.jsonl", &[doc(1), doc(2), doc(3)]);
+    let db = dir.path().join("db");
+    let (code, _, err) = run(&["import", "--db", db.to_str().unwrap(), input.to_str().unwrap()]);
+    assert_eq!(code, 0, "{err}");
+    let dbs = db.to_str().unwrap();
+    // make one record look like an older build wrote it
+    let (key, stale) = {
+        let store = store::open(&db, false).unwrap();
+        let mut first = None;
+        store
+            .scan_meta(&[0; 16], None, &mut |k, v| {
+                first = Some((*k, Meta::decode(v).unwrap()));
+                Ok(false)
+            })
+            .unwrap();
+        let (key, meta) = first.unwrap();
+        let stale = Meta { words: 1, entropy: None, ..meta };
+        store.put_raw(Keyspace::Meta, &key, Some(&stale.encode())).unwrap();
+        store.persist().unwrap();
+        (key, stale)
+    };
+    let (code, _, err) = run(&["check", "--db", dbs, "--deep"]);
+    assert_eq!(code, 1, "the stale record is a deep-check problem: {err}");
+
+    let (code, out, err) = run(&["recompute", "--db", dbs, "--dry-run", "-t", "2", "--batch-size", "1"]);
+    assert_eq!(code, 0, "{err}");
+    assert!(out.contains("Recomputed 3 documents in"), "{out}");
+    assert!(out.contains("Updated:               1  (would be rewritten)"), "{out}");
+    assert!(out.contains("Unchanged:             2"), "{out}");
+    assert!(out.contains("Dry run: nothing was written."), "{out}");
+    {
+        let store = store::open(&db, false).unwrap();
+        assert_eq!(Meta::decode(&store.get_meta(&key).unwrap().unwrap()).unwrap(), stale, "a dry run changes nothing");
+    }
+
+    let (code, out, err) = run(&["recompute", "--db", dbs, "-t", "2", "--batch-size", "1"]);
+    assert_eq!(code, 0, "{err}");
+    assert!(out.contains("Updated:               1  (features rewritten)"), "{out}");
+    assert!(out.contains("run `compact` to merge the rewritten tables"), "{out}");
+    let (code, _, err) = run(&["check", "--db", dbs, "--deep"]);
+    assert_eq!(code, 0, "after recompute the deep check is clean: {err}");
+    let (code, out, _) = run(&["recompute", "--db", dbs]);
+    assert_eq!(code, 0);
+    assert!(out.contains("Updated:               0") && out.contains("Unchanged:             3"), "{out}");
+    assert!(!out.contains("run `compact`"), "{out}");
+    let (code, out, _) = run(&["recompute", "--db", dbs, "--force"]);
+    assert_eq!(code, 0);
+    assert!(out.contains("Updated:               3") && out.contains("Unchanged:             0"), "{out}");
+    let (_, out, _) = run(&["count", "--db", dbs, "words == 1"]);
+    assert_eq!(out, "0 / 3 documents match (0.000%).\n");
+
+    let (code, _, err) = run(&["recompute", "--db", dir.path().join("nope").to_str().unwrap()]);
+    assert_eq!(code, 2, "{err}");
+    assert!(err.contains("not a pipeline store"), "{err}");
 }
 
 #[test]
@@ -394,8 +466,7 @@ fn books_store(dir: &Path) -> String {
     ];
     let input = write(dir, "books.jsonl", &lines);
     let db = dir.join("db");
-    let (code, out, err) =
-        run(&["import", "--db", db.to_str().unwrap(), "-s", "cli", "-e", "year,title,author,words", input.to_str().unwrap()]);
+    let (code, out, err) = run(&["import", "--db", db.to_str().unwrap(), "-e", "year,title,author,words", input.to_str().unwrap()]);
     assert_eq!(code, 0, "{err}");
     assert!(out.contains("Indexed:               4"), "{out}");
     db.to_str().unwrap().to_string()
@@ -604,7 +675,7 @@ fn info_show_compact_and_check() {
         );
         assert!(
             out.contains(
-                "Features:   len, bytes, words, uniqWords, sentences, uniqChars, vowel, alpha, entropy, compress, dictHit (schema 1)\n"
+                "Features:   len, bytes, uniqChars, words, uniqWords, meanWordLen, stopWords, sentences, vowel, alpha, entropy, compress, top4gram, dup5gram, dup10gram, dictHit (schema 1)\n"
             ),
             "{out}"
         );
@@ -864,4 +935,107 @@ fn explore_serves_through_the_cli() {
     let v: serde_json::Value = serde_json::from_str(&body).unwrap();
     assert_eq!(v["extra"]["author"], "Mary Shelley");
     assert!(v["text"].as_str().unwrap().starts_with("A The quick"));
+}
+
+#[test]
+fn query_prints_matches() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = books_store(dir.path());
+    let (code, out, err) = run(&["query", "--db", &db, "words > 40", "--sort", "words"]);
+    assert_eq!(code, 0, "{err}");
+    assert!(out.starts_with("=== Match 1 of 2  words 88 ===\nid:        "), "{out}");
+    assert!(out.contains("--- text (") && out.contains("C The quick brown fox"), "{out}");
+    assert!(out.contains("=== Match 2 of 2  words 59 ===\n"), "{out}");
+    assert_eq!(err, "Showed 2 of 2 matches, highest words first; scanned 4 documents.\n");
+    let (_, ids, _) = run(&["query", "--db", &db, "--sort", "words", "--asc", "-l", "1", "--ids"]);
+    assert_eq!(ids.lines().count(), 1);
+    let (_, shown, _) = run(&["show", "--db", &db, ids.trim(), "--json"]);
+    let v: serde_json::Value = serde_json::from_str(&shown).unwrap();
+    assert_eq!(v["words"], 30);
+    let (_, json, err) = run(&["query", "--db", &db, "source == \"web\"", "--json"]);
+    let v: serde_json::Value = serde_json::from_str(json.trim()).unwrap();
+    assert_eq!(v["source"], "web");
+    assert_eq!(err, "Showed all 1 matches; scanned 4 documents.\n");
+    let (_, out, err) = run(&["query", "--db", &db, "-l", "2", "--random", "--seed", "1", "--head", "5"]);
+    assert_eq!(out.matches("=== Match").count(), 2);
+    assert!(out.contains(" more chars]"), "{out}");
+    let (_, out, _) = run(&["query", "--db", &db, "source == \"gut\"", "--head", "1"]);
+    assert!(out.contains("=== Match 1 of 2, scanned ") && out.contains("=== Match 2 of 2, scanned "), "{out}");
+    assert!(err.starts_with("Showed the first 2 matches in key order"), "{err}");
+    let (_, all, _) = run(&["query", "--db", &db, "--full", "--random"]);
+    assert_eq!(all.matches("=== Match").count(), 4);
+    let (code, _, err) = run(&["query", "--db", &db, "--sort", "nope"]);
+    assert_eq!(code, 2, "{err}");
+    assert!(err.contains("not a feature"), "{err}");
+    let (code, _, err) = run(&["query", "--db", &db, "words >"]);
+    assert_ne!(code, 0, "{err}");
+}
+
+#[test]
+fn source_flag_overrides_the_record_and_reimport_relabels() {
+    let dir = tempfile::tempdir().unwrap();
+    let with_key = |n: usize, extra: Option<i64>| {
+        let mut v = serde_json::json!({ "text": format!("[{n}] {PROSE}"), "source": "tcp_p4" });
+        if let Some(y) = extra {
+            v["year"] = y.into();
+        }
+        v.to_string()
+    };
+    let f = write(dir.path(), "a.jsonl", &[with_key(1, Some(1600)), doc(2)]);
+    let db = dir.path().join("db");
+    let dbs = db.to_str().unwrap();
+    let count = |expr: &str| run(&["count", "--db", dbs, expr]).1;
+    // No -s: the record's key labels it, the rest get "cli".
+    let (code, _, err) = run(&["import", "--db", dbs, f.to_str().unwrap()]);
+    assert_eq!(code, 0, "{err}");
+    assert!(count("source == 'tcp_p4'").starts_with("1 / 2"));
+    assert!(count("source == 'cli'").starts_with("1 / 2"));
+    // Re-import with -s: same texts, every label replaced, nothing new indexed.
+    let (code, out, err) = run(&["import", "--db", dbs, "-s", "EEBO", "-e", "year", f.to_str().unwrap()]);
+    assert_eq!(code, 0, "{err}");
+    assert!(out.contains("Updated:               2") && out.contains("Indexed:               0"), "{out}");
+    assert!(out.contains("Unused sources removed: cli, tcp_p4\n"), "{out}");
+    assert!(count("source == 'EEBO'").starts_with("2 / 2"), "{}", count("source == 'EEBO'"));
+    assert!(run(&["info", "--db", dbs]).1.contains("Sources:    1 (EEBO)\n"));
+    assert!(count("extra.year == 1600").starts_with("1 / 2"));
+    // Same labels again: plain duplicates, nothing rewritten.
+    let (_, out, _) = run(&["import", "--db", dbs, "-s", "EEBO", "-e", "year", f.to_str().unwrap()]);
+    assert!(out.contains("Updated:               0") && out.contains("Duplicates:            2"), "{out}");
+    // A relabel without -e keeps the stored extras.
+    let (_, out, _) = run(&["import", "--db", dbs, "-s", "EVANS", f.to_str().unwrap()]);
+    assert!(out.contains("Updated:               2"), "{out}");
+    assert!(count("source == 'EVANS' && extra.year == 1600").starts_with("1 / 2"));
+    // A new extra value on the same text and source is an update too.
+    let g = write(dir.path(), "g.jsonl", &[with_key(1, Some(1601))]);
+    let (_, out, _) = run(&["import", "--db", dbs, "-s", "EVANS", "-e", "year", g.to_str().unwrap()]);
+    assert!(out.contains("Updated:               1"), "{out}");
+    assert!(count("extra.year == 1601").starts_with("1 / 2"));
+    let (code, out, _) = run(&["check", "--db", dbs, "--deep"]);
+    assert_eq!(code, 0, "{out}");
+    // A delete that empties a source drops its name too.
+    let h = write(dir.path(), "h.jsonl", &[doc(9)]);
+    run(&["import", "--db", dbs, "-s", "TMP", h.to_str().unwrap()]);
+    assert!(run(&["info", "--db", dbs]).1.contains("Sources:    2 (EVANS, TMP)\n"));
+    let (code, out, err) = run(&["delete", "--db", dbs, "-y", "source == 'TMP'"]);
+    assert_eq!(code, 0, "{err}");
+    assert!(out.contains("Unused sources removed: TMP\n"), "{out}");
+    assert!(run(&["info", "--db", dbs]).1.contains("Sources:    1 (EVANS)\n"));
+}
+
+#[test]
+fn extra_renames_keys() {
+    let dir = tempfile::tempdir().unwrap();
+    let line = serde_json::json!({ "text": PROSE, "Publication": "Gazette", "titleCode": "sn123", "year": 1800 }).to_string();
+    let f = write(dir.path(), "a.jsonl", &[line]);
+    let db = dir.path().join("db");
+    let dbs = db.to_str().unwrap();
+    let (code, _, err) = run(&["import", "--db", dbs, "-e", "Publication=title,titleCode=pubID,year", f.to_str().unwrap()]);
+    assert_eq!(code, 0, "{err}");
+    let (_, out, _) = run(&["count", "--db", dbs, "extra.title == 'Gazette' && extra.pubID == 'sn123' && extra.year == 1800"]);
+    assert!(out.starts_with("1 / 1"), "{out}");
+    let (_, out, _) = run(&["count", "--db", dbs, "has(extra.Publication) || has(extra.titleCode)"]);
+    assert!(out.starts_with("0 / 1"), "{out}");
+    let (code, _, err) = run(&["import", "--db", dbs, "-e", "title,Publication=title", f.to_str().unwrap()]);
+    assert_ne!(code, 0);
+    assert!(err.contains("two keys are stored as \"title\""), "{err}");
 }
