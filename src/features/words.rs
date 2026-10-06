@@ -5,7 +5,11 @@
 //! nothing). `uniqWords` lowercases ASCII letters and folds the curly
 //! apostrophe before hashing. An alphabetic word matches
 //! `[A-Za-z][A-Za-z'’-]*`; a vowel word is an alphabetic word containing one
-//! of `aeiouy` in either case.
+//! of `aeiouy` in either case. A dictionary word is an alphabetic word whose
+//! folded form is in `vocab.txt`, or ends in `'s` and is there without it.
+//!
+//! Both word lists are compiled into the binary with `include_str!`, so the
+//! executable needs no files at run time.
 
 use std::hash::BuildHasher;
 
@@ -21,21 +25,48 @@ pub struct WordStats {
     pub word_chars: u64,
     /// Words in [`STOPWORDS`].
     pub stop_words: u32,
+    /// Alphabetic words in [`VOCAB`].
+    pub dict_words: u32,
 }
 
 /// The stopword list: whitespace-separated words, `#` comments.
 pub const STOPWORDS: &str = include_str!("stopwords.txt");
 
+/// The `dictHit` vocabulary: one word per line, most frequent first, `#`
+/// comments (research/REPORT-vocab-2026-10-06.md).
+pub const VOCAB: &str = include_str!("vocab.txt");
+
 /// The stopwords as word hashes, made with the same hasher `scan_words`
 /// uses for every folded word, so membership is one set lookup.
-static STOP_SET: std::sync::LazyLock<HashSet<u64, IdentityBuild>> = std::sync::LazyLock::new(|| {
+static STOP_SET: std::sync::LazyLock<HashSet<u64, IdentityBuild>> = std::sync::LazyLock::new(|| hash_words(stopword_list()));
+
+/// The vocabulary as word hashes, like [`STOP_SET`].
+static VOCAB_SET: std::sync::LazyLock<HashSet<u64, IdentityBuild>> = std::sync::LazyLock::new(|| hash_words(vocab_list()));
+
+fn hash_words(words: impl Iterator<Item = &'static str>) -> HashSet<u64, IdentityBuild> {
     let hasher = foldhash::fast::FixedState::default();
-    stopword_list().map(|w| hasher.hash_one(w.as_bytes())).collect()
-});
+    words.map(|w| hasher.hash_one(w.as_bytes())).collect()
+}
+
+/// Whitespace-separated words of a list, `#` comment lines removed.
+fn word_list(list: &'static str) -> impl Iterator<Item = &'static str> {
+    list.lines().filter(|l| !l.trim_start().starts_with('#')).flat_map(str::split_whitespace)
+}
 
 /// The words of [`STOPWORDS`], comments removed.
 pub fn stopword_list() -> impl Iterator<Item = &'static str> {
-    STOPWORDS.lines().filter(|l| !l.trim_start().starts_with('#')).flat_map(str::split_whitespace)
+    word_list(STOPWORDS)
+}
+
+/// The words of [`VOCAB`], comments removed.
+pub fn vocab_list() -> impl Iterator<Item = &'static str> {
+    word_list(VOCAB)
+}
+
+/// Is the folded word `lower` (hash `h`) in the vocabulary, as it is or
+/// without a trailing `'s`?
+fn in_vocab(h: u64, lower: &[u8], hasher: &foldhash::fast::FixedState) -> bool {
+    VOCAB_SET.contains(&h) || lower.strip_suffix(b"'s").is_some_and(|stem| VOCAB_SET.contains(&hasher.hash_one(stem)))
 }
 
 /// Scratch reused across documents: the distinct-word set, a lowercase
@@ -313,6 +344,9 @@ pub fn scan_words(text: &str, scratch: &mut WordScratch) -> WordStats {
             if has_vowel(tb) {
                 st.vowel_words += 1;
             }
+            if in_vocab(h, &scratch.lower, &scratch.hasher) {
+                st.dict_words += 1;
+            }
         }
     }
     st
@@ -358,6 +392,9 @@ mod tests {
                 st.alpha_words += 1;
                 if has_vowel(bytes) {
                     st.vowel_words += 1;
+                }
+                if in_vocab(h, &sc.lower, &sc.hasher) {
+                    st.dict_words += 1;
                 }
             }
         }
@@ -416,6 +453,35 @@ mod tests {
         let unique: std::collections::HashSet<&&str> = list.iter().collect();
         assert_eq!(unique.len(), list.len(), "no duplicates");
         assert_eq!(STOP_SET.len(), list.len());
+    }
+
+    #[test]
+    fn dictionary_words_match_any_case() {
+        // christ god and the are in the vocabulary in lowercase
+        let st = scan("Christ CHRIST christ God GOD god The tbe 1842 Xqzvw");
+        assert_eq!((st.alpha_words, st.dict_words), (9, 7), "{st:?}");
+        // a curly apostrophe folds before the lookup; a possessive falls back to its stem
+        let st = scan("don’t Wilberforce's Xqzvw's isn't");
+        assert_eq!((st.alpha_words, st.dict_words), (4, 3), "{st:?}");
+        // only alphabetic words are looked up: numbers and hyphen-free junk miss or don't count
+        assert_eq!(scan("1842 £20 x9").dict_words, 0);
+    }
+
+    #[test]
+    fn vocabulary_is_folded_unique_and_ranked() {
+        let list: Vec<&str> = vocab_list().collect();
+        assert_eq!(list.len(), 98_304);
+        assert_eq!(&list[..3], ["the", "of", "and"]);
+        assert!(list.contains(&"christ") && list.contains(&"god") && list.contains(&"to-day") && list.contains(&"haue"));
+        let alpha = |w: &&str| {
+            let b = w.as_bytes();
+            b[0].is_ascii_lowercase() && b.iter().all(|&c| c.is_ascii_lowercase() || c == b'\'' || c == b'-')
+        };
+        assert!(list.iter().all(alpha), "every entry is folded and matches [a-z][a-z'-]*");
+        assert!(!list.iter().any(|w| w.len() == 1 && !"aeiou".contains(*w)), "no single consonants");
+        let unique: std::collections::HashSet<&&str> = list.iter().collect();
+        assert_eq!(unique.len(), list.len(), "no duplicates");
+        assert_eq!(VOCAB_SET.len(), list.len());
     }
 
     #[test]

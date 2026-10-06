@@ -85,6 +85,8 @@ pub struct Features {
     /// Characters in all words.
     pub word_chars: u64,
     pub stop_words: u32,
+    /// Alphabetic words in the vocabulary.
+    pub dict_words: u32,
     /// Hundredths of a bit per character.
     pub entropy: u16,
     /// LZ4 size over raw size, basis points of `COMPRESS_NORM`.
@@ -125,7 +127,7 @@ impl Features {
             vowel: basis_points(self.vowel_words, self.alpha_words),
             alpha: basis_points(self.alpha_words, self.words),
             flags: if has_extra { FLAG_HAS_EXTRA } else { 0 },
-            dict_hit: None,
+            dict_hit: Some(basis_points(self.dict_words, self.alpha_words)),
             entropy: Some(self.entropy),
             compress: Some(self.compress),
             mean_word_len: Some(hundredths(self.word_chars, self.words)),
@@ -176,6 +178,7 @@ pub fn compute(text: &str, max_len: u32, scratch: &mut Scratch) -> Result<Featur
         vowel_words: w.vowel_words,
         word_chars: w.word_chars,
         stop_words: w.stop_words,
+        dict_words: w.dict_words,
         entropy: cs.entropy,
         compress,
         ngrams,

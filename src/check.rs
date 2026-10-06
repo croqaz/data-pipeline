@@ -239,8 +239,7 @@ fn deep_check(key: &Key, text: &[u8], meta: Option<&Meta>, acc: &mut Acc, scratc
             return;
         }
     };
-    let stored = Meta { schema: fresh.schema, dict_hit: None, ..m.clone() };
-    let fresh = Meta { dict_hit: None, ..fresh };
+    let stored = Meta { schema: fresh.schema, ..m.clone() };
     if stored != fresh {
         acc.problem(Problem::StaleFeatures, key);
     }

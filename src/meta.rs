@@ -43,7 +43,8 @@ pub struct Meta {
     pub alpha: u16,
     #[n(10)]
     pub flags: u8,
-    /// Phase 2: dictionary hit rate in basis points. Reserved, not computed yet.
+    /// Basis points of the alphabetic words in the vocabulary
+    /// (`src/features/vocab.txt`); `None` on records imported before it.
     #[n(11)]
     pub dict_hit: Option<u16>,
     /// Order-0 Shannon entropy of the characters as basis points of 4.47

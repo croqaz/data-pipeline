@@ -500,7 +500,7 @@ fn export_default_layout() {
         assert_eq!(frank["id"].as_str().unwrap().len(), 32);
         assert!(frank["text"].as_str().unwrap().starts_with("A The quick"));
         assert_eq!(frank["vowel"], 100.0);
-        assert!(frank.get("dictHit").is_none());
+        assert_eq!(frank["dictHit"], 96.67, "29 of 30 words: only \"vexingly\" is not in the vocabulary");
         let d = docs.iter().find(|d| d["title"] == "Quote \"d\"").unwrap();
         assert_eq!(d["words"], 30, "the feature wins over the imported `words` key");
         assert_eq!(d["year"], "1850");

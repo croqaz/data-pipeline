@@ -36,3 +36,4 @@ bench/
 *.log
 *.err
 *-DB/
+Vintage-*/
