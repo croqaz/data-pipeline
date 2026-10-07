@@ -675,7 +675,7 @@ fn info_show_compact_and_check() {
         );
         assert!(
             out.contains(
-                "Features:   len, bytes, uniqChars, words, uniqWords, meanWordLen, stopWords, sentences, vowel, alpha, entropy, compress, top4gram, dup5gram, dup10gram, dictHit (schema 1)\n"
+                "Features:   len, bytes, uniqChars, words, uniqWords, meanWordLen, stopWords, lines, sentences, vowel, alpha, dictHit, dup5gram, entropy, quality (schema 1)\n"
             ),
             "{out}"
         );

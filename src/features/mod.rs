@@ -4,7 +4,6 @@
 //! soon as a prefilter rule fails so junk never reaches the expensive passes.
 
 pub mod chars;
-pub mod compress;
 pub mod ngrams;
 pub mod sentences;
 pub mod words;
@@ -68,7 +67,6 @@ pub struct Scratch {
     pub chars: chars::CharFreq,
     pub words: words::WordScratch,
     pub norm: Vec<u8>,
-    pub lz4: Vec<u8>,
     pub ngrams: ngrams::NgramScratch,
 }
 
@@ -78,6 +76,8 @@ pub struct Features {
     pub bytes: u32,
     pub words: u32,
     pub uniq_words: u32,
+    /// Lines with any non-whitespace character.
+    pub lines: u32,
     pub sentences: u32,
     pub uniq_chars: u32,
     pub alpha_words: u32,
@@ -89,9 +89,10 @@ pub struct Features {
     pub dict_words: u32,
     /// Hundredths of a bit per character.
     pub entropy: u16,
-    /// LZ4 size over raw size, basis points of `COMPRESS_NORM`.
-    pub compress: u16,
-    pub ngrams: ngrams::NgramStats,
+    /// Character-class score in hundredths, see `chars::quality_weight`.
+    pub quality: u16,
+    /// Characters inside repeated 5-word windows, basis points.
+    pub dup5gram: u16,
 }
 
 /// Basis points of `num / den`, rounded; 0 when `den` is 0.
@@ -120,21 +121,20 @@ impl Features {
             source,
             len: self.len,
             bytes: self.bytes,
+            uniq_chars: self.uniq_chars,
             words: self.words,
             uniq_words: self.uniq_words,
+            lines: Some(self.lines),
             sentences: self.sentences,
-            uniq_chars: self.uniq_chars,
             vowel: basis_points(self.vowel_words, self.alpha_words),
             alpha: basis_points(self.alpha_words, self.words),
             flags: if has_extra { FLAG_HAS_EXTRA } else { 0 },
             dict_hit: Some(basis_points(self.dict_words, self.alpha_words)),
             entropy: Some(self.entropy),
-            compress: Some(self.compress),
+            dup5gram: Some(self.dup5gram),
             mean_word_len: Some(hundredths(self.word_chars, self.words)),
             stop_words: Some(basis_points(self.stop_words, self.words)),
-            top4gram: Some(self.ngrams.top4),
-            dup5gram: Some(self.ngrams.dup5),
-            dup10gram: Some(self.ngrams.dup10),
+            quality: Some(self.quality),
         }
     }
 }
@@ -164,14 +164,15 @@ pub fn compute(text: &str, max_len: u32, scratch: &mut Scratch) -> Result<Featur
     if w.words < MIN_WORDS {
         return Err(DropReason::FewWords);
     }
-    let ngrams = ngrams::ngram_stats(scratch.words.hashes(), scratch.words.lens(), &mut scratch.ngrams);
+    let dup5gram = ngrams::dup5gram(scratch.words.hashes(), scratch.words.lens(), &mut scratch.ngrams);
+    let lines = chars::count_lines(text.as_bytes());
     let sentences = sentences::count_sentences(text);
-    let compress = compress::compress_ratio(text.as_bytes(), &mut scratch.lz4);
     Ok(Features {
         len,
         bytes: bytes as u32,
         words: w.words,
         uniq_words: w.uniq_words,
+        lines,
         sentences,
         uniq_chars,
         alpha_words: w.alpha_words,
@@ -180,8 +181,8 @@ pub fn compute(text: &str, max_len: u32, scratch: &mut Scratch) -> Result<Featur
         stop_words: w.stop_words,
         dict_words: w.dict_words,
         entropy: cs.entropy,
-        compress,
-        ngrams,
+        quality: cs.quality,
+        dup5gram,
     })
 }
 
@@ -199,7 +200,9 @@ How vexingly quick daft zebras jump. The five boxing wizards jump quickly.";
         assert_eq!(f.bytes as usize, PROSE.len());
         assert_eq!(f.len as usize, PROSE.chars().count());
         assert_eq!(f.words, 29);
+        assert_eq!(f.lines, 1);
         assert_eq!(f.sentences, 4);
+        assert!((10_000..11_000).contains(&f.quality), "{}", f.quality);
         assert!(f.uniq_chars > 20 && f.uniq_chars < 40);
         assert_eq!(f.alpha_words, 29);
         assert_eq!(f.vowel_words, 29);

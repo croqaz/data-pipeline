@@ -166,20 +166,6 @@ def ngram_counts(words, n):
     return grams, Counter(grams)
 
 
-def top_ngram(words, n):
-    """Characters covered by every occurrence of the most frequent n-gram
-    (first seen wins a tie), over all word characters; 0 unless it repeats."""
-    total = sum(len(w) for w in words)
-    grams, counts = ngram_counts(words, n)
-    best, best_gram = 1, None
-    for g in grams:
-        if counts[g] > best:
-            best, best_gram = counts[g], g
-    if best_gram is None or total == 0:
-        return 0
-    return basis_points(best * sum(len(w) for w in best_gram), total)
-
-
 def dup_ngram(words, n):
     """Characters of the words inside any n-gram occurring more than once,
     each word counted once, over all word characters."""
@@ -206,6 +192,40 @@ def char_entropy(text):
     return min(65_535, round(max(h, 0.0) / 4.47 * 10_000))
 
 
+LATIN_PUNCT = set(".,;:!?'\"-()\u2018\u2019\u201c\u201d\u2013\u2014")
+
+
+def quality_weight(ch):
+    """Twice the quality weight of one character."""
+    o = ord(ch)
+    if ("a" <= ch <= "z") or ("A" <= ch <= "Z"):
+        return 4
+    if ch.isdigit() and o < 128 or ch in " \n\r":
+        return 2
+    if ch in LATIN_PUNCT:
+        return 1
+    in_range = 0x80 <= o <= 0x24F or 0x370 <= o <= 0x3FF or 0x1E00 <= o <= 0x1EFF or 0xFB00 <= o <= 0xFB06
+    if in_range and ch.isalpha():
+        return 4
+    return -1
+
+
+def quality(text):
+    """Mean weight minus 0.75, in hundredths, clamped to 0..12500, half up."""
+    n = len(text)
+    if n == 0:
+        return 0
+    num = sum(quality_weight(c) for c in text) * 5_000 - 7_500 * n
+    if num <= 0:
+        return 0
+    return min(12_500, (num + n // 2) // n)
+
+
+def count_lines(text):
+    """Lines (split on \\n or \\r) with a character other than ASCII whitespace."""
+    return sum(1 for line in re.split(r"[\r\n]", text) if line.strip(" \t\x0b\x0c"))
+
+
 def compute(text, max_len=MAX_LEN):
     nbytes = len(text.encode("utf-8"))
     if nbytes <= MIN_LEN:
@@ -229,18 +249,16 @@ def compute(text, max_len=MAX_LEN):
         "bytes": nbytes,
         "words": words,
         "uniqWords": uniq_words,
+        "lines": count_lines(text),
         "sentences": count_sentences(text),
         "uniqChars": uniq,
         "vowel": basis_points(vowel, alpha),
         "alpha": basis_points(alpha, words),
-        # `compress` (LZ4 ratio) is not here: no independent LZ4 is installed,
-        # so src/features/compress.rs checks it against known inputs instead.
         "entropy": char_entropy(text),
+        "quality": quality(text),
         "meanWordLen": mean_word_len(folded),
         "stopWords": stop_share(folded),
-        "top4gram": top_ngram(folded, 4),
         "dup5gram": dup_ngram(folded, 5),
-        "dup10gram": dup_ngram(folded, 10),
     }
 
 

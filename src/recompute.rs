@@ -329,8 +329,8 @@ How vexingly quick daft zebras jump. The five boxing wizards jump quickly.";
         let stale_text = format!("A {PROSE}");
         let fine_text = format!("B {PROSE}");
         let short_text = "short text, under the prefilter's minimum".to_string();
-        // stale: imported by an older build that had no entropy or compress, and counted words wrong
-        let stale = Meta { words: 1, entropy: None, compress: None, flags: FLAG_HAS_EXTRA | 0b1000_0000, ..current(&stale_text, 3, true) };
+        // stale: imported by an older build that had no entropy or quality, and counted words wrong
+        let stale = Meta { words: 1, entropy: None, quality: None, flags: FLAG_HAS_EXTRA | 0b1000_0000, ..current(&stale_text, 3, true) };
         // short: today's prefilter rejects it; whatever it has stays
         let short_meta = Meta { words: 9, ..Default::default() };
         store

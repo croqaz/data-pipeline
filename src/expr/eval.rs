@@ -363,6 +363,7 @@ mod tests {
             bytes: 510,
             words: 80,
             uniq_words: 60,
+            lines: None,
             sentences: 5,
             uniq_chars: 30,
             vowel: 9900,
@@ -370,12 +371,10 @@ mod tests {
             flags: 1,
             dict_hit: Some(8000),
             entropy: Some(9660),
-            compress: Some(5800),
-            top4gram: None,
             dup5gram: None,
-            dup10gram: None,
             mean_word_len: None,
             stop_words: None,
+            quality: Some(9_950),
         };
         let key = [0xabu8; 16];
         let extra = br#"{"year": 1842, "title": "The \"Raven\"", "ok": true, "none": null, "tags": ["a", 1], "obj": {"k": 2}}"#;

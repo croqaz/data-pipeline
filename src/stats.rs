@@ -150,8 +150,11 @@ impl FeatureAcc {
         if self.present == 0 { 0.0 } else { self.sum / self.present as f64 }
     }
 
+    /// The histogram answers with the top of a value's bucket (3 significant
+    /// digits), which can pass the largest value seen: clamp to it, so a P95
+    /// never reads above the Max column.
     pub fn percentile(&self, q: f64) -> u64 {
-        if self.present == 0 { 0 } else { self.hist.value_at_quantile(q) }
+        if self.present == 0 { 0 } else { self.hist.value_at_quantile(q).min(self.max) }
     }
 }
 
@@ -300,7 +303,13 @@ mod tests {
         assert_eq!(a.min, 10);
         assert_eq!(a.max, 40);
         assert!(a.percentile(0.5) >= 20 && a.percentile(0.5) <= 30);
-        assert!(a.percentile(0.95) >= 40);
+        assert_eq!(a.percentile(0.95), 40);
+        // 10000 shares a bucket with 10007: the percentile stops at the max
+        let mut full = FeatureAcc::new();
+        for _ in 0..20 {
+            full.add(10_000);
+        }
+        assert_eq!(full.percentile(0.95), 10_000);
     }
 
     #[test]

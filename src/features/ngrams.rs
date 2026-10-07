@@ -1,27 +1,17 @@
-//! Word n-gram repetition: `top4gram`, `dup5gram`, `dup10gram`.
+//! Word n-gram repetition: `dup5gram`.
 //!
 //! The words are the tokens of `words`, folded like `uniqWords`, each
-//! weighing its character count. `top4gram` is the share of characters
-//! covered by every occurrence of the most frequent n-gram (ties go to the
-//! one seen first), 0 unless it occurs at least twice. `dupNgram` is the
-//! share of characters inside any n-gram that occurs at least twice, each
-//! word counted once. Both are basis points, capped at 10000.
+//! weighing its character count. `dup5gram` is the share of characters
+//! inside any 5-word window that occurs at least twice, each word counted
+//! once, in basis points.
 
 use hashbrown::HashMap;
 
 use super::basis_points;
 use super::words::IdentityBuild;
 
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub struct NgramStats {
-    pub top4: u16,
-    pub dup5: u16,
-    pub dup10: u16,
-}
-
 /// Scratch reused across documents: window hash to slot, per-window slots
-/// and counts, the counts per slot, the "repeats" flags of the previous
-/// size, and the prefix sums of word lengths.
+/// and counts, the counts per slot, and the prefix sums of word lengths.
 #[derive(Default)]
 pub struct NgramScratch {
     map: HashMap<u64, u32, IdentityBuild>,
@@ -29,8 +19,6 @@ pub struct NgramScratch {
     slots: Vec<u32>,
     per_slot: Vec<u32>,
     counts: Vec<u32>,
-    rep4: Vec<bool>,
-    rep5: Vec<bool>,
     prefix: Vec<u64>,
 }
 
@@ -45,10 +33,10 @@ fn mix(mut x: u64) -> u64 {
     x
 }
 
-/// Count every window of `n` words for which `keep(i)` holds; leaves
-/// `sc.counts[i]` set (0 for windows not kept). Window hashes roll in O(1):
-/// a polynomial in `B` over the word hashes, modulo 2^64.
-fn count_windows(words: &[u64], n: usize, sc: &mut NgramScratch, keep: impl Fn(usize) -> bool) {
+/// Count every window of `n` words; leaves `sc.counts[i]` set to the number
+/// of occurrences of window `i`. Window hashes roll in O(1): a polynomial in
+/// `B` over the word hashes, modulo 2^64.
+fn count_windows(words: &[u64], n: usize, sc: &mut NgramScratch) {
     let windows = words.len() + 1 - n;
     sc.hashes.clear();
     let top = B.wrapping_pow(n as u32 - 1);
@@ -70,49 +58,23 @@ fn count_windows(words: &[u64], n: usize, sc: &mut NgramScratch, keep: impl Fn(u
     // the per-slot counts are read back by index.
     sc.slots.clear();
     sc.per_slot.clear();
-    for i in 0..windows {
-        if keep(i) {
-            let next = sc.per_slot.len() as u32;
-            let slot = *sc.map.entry(sc.hashes[i]).or_insert(next);
-            if slot == next {
-                sc.per_slot.push(0);
-            }
-            sc.per_slot[slot as usize] += 1;
-            sc.slots.push(slot);
-        } else {
-            sc.slots.push(u32::MAX);
+    for &h in &sc.hashes {
+        let next = sc.per_slot.len() as u32;
+        let slot = *sc.map.entry(h).or_insert(next);
+        if slot == next {
+            sc.per_slot.push(0);
         }
+        sc.per_slot[slot as usize] += 1;
+        sc.slots.push(slot);
     }
     sc.counts.clear();
-    sc.counts.extend(sc.slots.iter().map(|&s| if s == u32::MAX { 0 } else { sc.per_slot[s as usize] }));
+    sc.counts.extend(sc.slots.iter().map(|&s| sc.per_slot[s as usize]));
 }
 
-/// Most frequent window (first seen on a tie), as basis points of the text.
-fn top(sc: &NgramScratch, n: usize) -> u16 {
-    let (mut best, mut at) = (1u32, 0usize);
-    for (i, &c) in sc.counts.iter().enumerate() {
-        if c > best {
-            (best, at) = (c, i);
-        }
-    }
-    if best < 2 {
-        return 0;
-    }
-    let covered = u64::from(best) * (sc.prefix[at + n] - sc.prefix[at]);
-    basis_points_u64(covered, *sc.prefix.last().expect("prefix starts with 0"))
-}
-
-/// Characters inside repeated windows, each word once; records the
-/// per-window "repeats" flags in `rep` when given.
-fn dup(sc: &NgramScratch, n: usize, mut rep: Option<&mut Vec<bool>>) -> u16 {
-    if let Some(r) = rep.as_deref_mut() {
-        r.clear();
-    }
+/// Characters inside repeated windows, each word once.
+fn dup(sc: &NgramScratch, n: usize) -> u16 {
     let (mut marked, mut end) = (0u64, 0usize);
     for (i, &c) in sc.counts.iter().enumerate() {
-        if let Some(r) = rep.as_deref_mut() {
-            r.push(c >= 2);
-        }
         if c >= 2 {
             let start = i.max(end);
             marked += sc.prefix[i + n] - sc.prefix[start];
@@ -132,12 +94,7 @@ fn basis_points_u64(num: u64, den: u64) -> u16 {
 
 /// `words[i]` identifies word `i` after folding, `lens[i]` is its length in
 /// characters.
-///
-/// Every 4-gram is counted. A repeated 5-gram is two overlapping repeated
-/// 4-grams and a repeated 10-gram two repeated 5-grams, so the longer sizes
-/// only count windows whose parts already repeat. Every occurrence of a repeated window passes
-/// that test, so its count stays exact.
-pub fn ngram_stats(words: &[u64], lens: &[u32], sc: &mut NgramScratch) -> NgramStats {
+pub fn dup5gram(words: &[u64], lens: &[u32], sc: &mut NgramScratch) -> u16 {
     debug_assert_eq!(words.len(), lens.len());
     sc.prefix.clear();
     sc.prefix.push(0);
@@ -146,29 +103,15 @@ pub fn ngram_stats(words: &[u64], lens: &[u32], sc: &mut NgramScratch) -> NgramS
         acc += u64::from(l);
         sc.prefix.push(acc);
     }
-    let mut st = NgramStats::default();
-    if acc == 0 || words.len() < 4 {
-        return st;
+    if acc == 0 || words.len() < 5 {
+        return 0;
     }
-    count_windows(words, 4, sc, |_| true);
-    st.top4 = top(sc, 4);
-    let mut rep4 = std::mem::take(&mut sc.rep4);
-    dup(sc, 4, Some(&mut rep4));
-    if words.len() >= 5 {
-        count_windows(words, 5, sc, |i| rep4[i] && rep4[i + 1]);
-        let mut rep5 = std::mem::take(&mut sc.rep5);
-        st.dup5 = dup(sc, 5, Some(&mut rep5));
-        if words.len() >= 10 {
-            count_windows(words, 10, sc, |i| rep5[i] && rep5[i + 5]);
-            st.dup10 = dup(sc, 10, None);
-        }
-        sc.rep5 = rep5;
-    }
-    sc.rep4 = rep4;
+    count_windows(words, 5, sc);
+    let dup5 = dup(sc, 5);
     if words.len() > BIG_DOC {
         *sc = NgramScratch::default();
     }
-    st
+    dup5
 }
 
 /// Above this many words a document's buffers are freed afterwards, so each
@@ -180,46 +123,39 @@ mod tests {
     use super::super::words::{WordScratch, scan_words};
     use super::*;
 
-    fn stats(text: &str) -> NgramStats {
+    fn dup5(text: &str) -> u16 {
         let mut w = WordScratch::default();
         scan_words(text, &mut w);
-        ngram_stats(w.hashes(), w.lens(), &mut NgramScratch::default())
+        dup5gram(w.hashes(), w.lens(), &mut NgramScratch::default())
     }
 
     #[test]
     fn degenerate_loop_is_all_repetition() {
-        // "and he said" x 200: 600 words of 3+2+4 = 9 chars per loop, 1800 total.
-        let s = stats(&"And he said. ".repeat(200));
-        // 4-grams "and he said and" (12 chars) occur 199 or 198 times: capped
-        assert_eq!(s.top4, 10_000);
-        assert_eq!(s.dup5, 10_000);
-        assert_eq!(s.dup10, 10_000);
+        assert_eq!(dup5(&"And he said. ".repeat(200)), 10_000);
     }
 
     #[test]
-    fn clean_prose_is_near_zero() {
-        let s = stats(
-            "Once upon a midnight dreary, while I pondered, weak and weary, over many a quaint and curious volume \
-of forgotten lore, while I nodded, nearly napping, suddenly there came a tapping, as of some one gently rapping.",
-        );
-        assert_eq!((s.top4, s.dup5, s.dup10), (0, 0, 0));
+    fn clean_prose_is_zero() {
+        let raven = "Once upon a midnight dreary, while I pondered, weak and weary, over many a quaint and curious volume \
+of forgotten lore, while I nodded, nearly napping, suddenly there came a tapping, as of some one gently rapping.";
+        assert_eq!(dup5(raven), 0);
     }
 
     #[test]
     fn drift_into_a_loop_marks_the_second_half() {
         let clean: String = (0..100).map(|i| format!("w{i} ")).collect();
-        let s = stats(&(clean + &"the same eleven words keep coming back here again and again ".repeat(10)));
         // 100 words of 290 chars, then 110 words of 490 chars that all repeat
-        assert_eq!(s.dup10, 6282);
-        assert_eq!(s.dup5, s.dup10);
+        assert_eq!(dup5(&(clean + &"the same eleven words keep coming back here again and again ".repeat(10))), 6282);
     }
 
     #[test]
     fn case_and_apostrophes_fold_and_overlaps_count_once() {
-        assert_eq!(stats("Don’t stop now. don't STOP now."), stats("don't stop now don't stop now"));
+        assert_eq!(dup5("Don’t stop now, go home. don't STOP now, go HOME."), 10_000);
         // "a b c d e" twice, overlapping windows: every word marked once
-        assert_eq!(stats("a b c d e a b c d e").dup5, 10_000);
-        assert_eq!(stats("a b c d e f g h i j").dup5, 0);
+        assert_eq!(dup5("a b c d e a b c d e"), 10_000);
+        assert_eq!(dup5("a b c d e f g h i j"), 0);
+        // a repeated 4-word phrase is not enough
+        assert_eq!(dup5("a b c d x a b c d y"), 0);
     }
 
     #[test]
@@ -227,19 +163,15 @@ of forgotten lore, while I nodded, nearly napping, suddenly there came a tapping
         let words: Vec<u64> = (0..BIG_DOC as u64 + 1).map(|i| i % 1000).collect();
         let lens = vec![1u32; words.len()];
         let mut sc = NgramScratch::default();
-        let s = ngram_stats(&words, &lens, &mut sc);
-        assert_eq!(s.dup10, 10_000);
+        assert_eq!(dup5gram(&words, &lens, &mut sc), 10_000);
         assert_eq!(sc.prefix.capacity(), 0);
     }
 
     #[test]
     fn short_and_empty_inputs() {
-        assert_eq!(stats(""), NgramStats::default());
-        assert_eq!(stats("one"), NgramStats::default());
-        let s = stats("one two one two");
-        assert_eq!((s.top4, s.dup5), (0, 0), "one 4-gram window, seen once");
-        let s = stats("a b c d a b c d");
-        assert_eq!((s.top4, s.dup5), (10_000, 0), "\"a b c d\" twice covers every word");
+        assert_eq!(dup5(""), 0);
+        assert_eq!(dup5("one"), 0);
+        assert_eq!(dup5("a b c d a b c d"), 0, "under two 5-word windows alike");
         assert_eq!(basis_points_u64(1, 0), 0);
         assert_eq!(basis_points_u64(u64::from(u32::MAX) * 3, u64::from(u32::MAX) * 4), 7500);
         assert_eq!(basis_points_u64(u64::MAX / 2, u64::from(u32::MAX) * 4), 10_000);

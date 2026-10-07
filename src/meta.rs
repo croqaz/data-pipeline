@@ -1,7 +1,8 @@
 //! The per-document feature record and the feature registry.
 //!
-//! `Meta` is stored as a CBOR map with small integer keys (minicbor), so a
-//! feature added later is one more optional field and one registry entry.
+//! `Meta` is stored as a CBOR map with small integer keys (minicbor),
+//! numbered in field order from 0. A feature added later is one more
+//! optional field and one registry entry.
 //! Percent-like features are stored as basis points (`u16`, 10000 = 100%)
 //! and presented as percents with two decimals.
 
@@ -33,46 +34,43 @@ pub struct Meta {
     /// Distinct words after lowercasing and apostrophe folding.
     #[n(6)]
     pub uniq_words: u32,
+    /// Lines with any non-whitespace character.
     #[n(7)]
+    pub lines: Option<u32>,
+    #[n(8)]
     pub sentences: u32,
     /// Basis points: alphabetic words containing a vowel, over alphabetic words.
-    #[n(8)]
+    #[n(9)]
     pub vowel: u16,
     /// Basis points: purely alphabetic words over all words.
-    #[n(9)]
-    pub alpha: u16,
     #[n(10)]
+    pub alpha: u16,
+    #[n(11)]
     pub flags: u8,
     /// Basis points of the alphabetic words in the vocabulary
     /// (`src/features/vocab.txt`); `None` on records imported before it.
-    #[n(11)]
+    #[n(12)]
     pub dict_hit: Option<u16>,
     /// Order-0 Shannon entropy of the characters as basis points of 4.47
     /// bits per character: 10000 is 4.47 bits, clean period prose sits near 10000.
-    #[n(12)]
-    pub entropy: Option<u16>,
-    /// LZ4 compressed size over raw size as basis points of 0.82: 10000 is
-    /// ordinary prose.
     #[n(13)]
-    pub compress: Option<u16>,
-    /// Basis points of the characters covered by every occurrence of the
-    /// most frequent word 4-gram (0 unless it occurs twice).
-    #[n(14)]
-    pub top4gram: Option<u16>,
+    pub entropy: Option<u16>,
     /// Basis points of the characters inside word 5-grams that occur more
     /// than once.
-    #[n(15)]
+    #[n(14)]
     pub dup5gram: Option<u16>,
-    /// Same for word 10-grams.
-    #[n(16)]
-    pub dup10gram: Option<u16>,
     /// Mean characters per word, in hundredths (452 = 4.52).
-    #[n(17)]
+    #[n(15)]
     pub mean_word_len: Option<u16>,
     /// Basis points of the words that are in the stopword list
     /// (`src/features/stopwords.txt`).
-    #[n(18)]
+    #[n(16)]
     pub stop_words: Option<u16>,
+    /// Character-class score in hundredths: Latin letters weigh 2, digits
+    /// and spaces 1, punctuation 0.5, anything else -0.5; the mean minus
+    /// 0.75, clamped to 0..=125. Prose reads about 100.
+    #[n(17)]
+    pub quality: Option<u16>,
 }
 
 impl Meta {
@@ -138,6 +136,12 @@ macro_rules! int_feature {
     };
 }
 
+macro_rules! opt_int_feature {
+    ($name:literal, $field:ident) => {
+        FeatureDef { name: $name, kind: Kind::Int, get: |m| m.$field.map(f64::from), raw: |m| m.$field.map(u64::from) }
+    };
+}
+
 macro_rules! opt_pct_feature {
     ($name:literal, $field:ident) => {
         FeatureDef { name: $name, kind: Kind::Pct, get: |m| m.$field.map(|v| f64::from(v) / 100.0), raw: |m| m.$field.map(u64::from) }
@@ -160,15 +164,14 @@ pub const FEATURES: &[FeatureDef] = &[
     int_feature!("uniqWords", uniq_words),
     opt_pct_feature!("meanWordLen", mean_word_len),
     opt_pct_feature!("stopWords", stop_words),
+    opt_int_feature!("lines", lines),
     int_feature!("sentences", sentences),
     pct_feature!("vowel", vowel),
     pct_feature!("alpha", alpha),
-    opt_pct_feature!("entropy", entropy),
-    opt_pct_feature!("compress", compress),
-    opt_pct_feature!("top4gram", top4gram),
-    opt_pct_feature!("dup5gram", dup5gram),
-    opt_pct_feature!("dup10gram", dup10gram),
     opt_pct_feature!("dictHit", dict_hit),
+    opt_pct_feature!("dup5gram", dup5gram),
+    opt_pct_feature!("entropy", entropy),
+    opt_pct_feature!("quality", quality),
 ];
 
 pub fn feature_index(name: &str) -> Option<usize> {
@@ -191,6 +194,7 @@ mod tests {
             bytes: 1210,
             words: 200,
             uniq_words: 150,
+            lines: None,
             sentences: 12,
             uniq_chars: 40,
             vowel: 9950,
@@ -198,12 +202,10 @@ mod tests {
             flags: FLAG_HAS_EXTRA,
             dict_hit: None,
             entropy: Some(9800),
-            compress: Some(6020),
-            top4gram: None,
             dup5gram: None,
-            dup10gram: None,
             mean_word_len: None,
             stop_words: None,
+            quality: Some(10_150),
         }
     }
 
@@ -227,19 +229,24 @@ mod tests {
         let dict = feature_index("dictHit").unwrap();
         assert_eq!((FEATURES[dict].get)(&decoded), Some(88.0));
         assert_eq!((FEATURES[dict].raw)(&decoded), Some(8800));
-        let old = Meta { entropy: None, compress: None, ..sample() };
+        let old = Meta { entropy: None, quality: None, ..sample() };
         let decoded = Meta::decode(&old.encode()).unwrap();
         assert_eq!((FEATURES[feature_index("entropy").unwrap()].get)(&decoded), None);
-        assert_eq!((FEATURES[feature_index("compress").unwrap()].get)(&sample()), Some(60.2));
+        assert_eq!((FEATURES[feature_index("quality").unwrap()].get)(&sample()), Some(101.5));
+        let lines = &FEATURES[feature_index("lines").unwrap()];
+        assert_eq!((lines.get)(&sample()), None);
+        let m = Meta { lines: Some(70_000), ..sample() };
+        assert_eq!(((lines.get)(&m), (lines.raw)(&m), lines.decimals()), (Some(70_000.0), Some(70_000), 0));
+        assert_eq!(Meta::decode(&m.encode()).unwrap(), m);
         assert_eq!(FEATURES[feature_index("entropy").unwrap()].decimals(), 2);
     }
 
     #[test]
     fn unknown_future_fields_are_skipped() {
-        // A record written by a newer binary: every v1 field plus field 99.
+        // A record written by a newer binary: every required field plus field 99.
         let mut enc = minicbor::Encoder::new(Vec::new());
         enc.map(12).unwrap();
-        for (k, v) in [(0u8, 1u32), (1, 0), (2, 101), (3, 101), (4, 20), (5, 50), (6, 40), (7, 2), (8, 10_000), (9, 10_000), (10, 0)] {
+        for (k, v) in [(0u8, 1u32), (1, 0), (2, 101), (3, 101), (4, 20), (5, 50), (6, 40), (8, 2), (9, 10_000), (10, 10_000), (11, 0)] {
             enc.u8(k).unwrap().u32(v).unwrap();
         }
         enc.u8(99).unwrap().u32(7).unwrap();
@@ -247,9 +254,10 @@ mod tests {
         let m = Meta::decode(&bytes).unwrap();
         assert_eq!(m.words, 50);
         assert_eq!(m.len, 101);
+        assert_eq!((m.sentences, m.alpha, m.lines), (2, 10_000, None));
         assert_eq!(m.dict_hit, None);
         assert!(!m.has_extra());
-        // A v1 field missing altogether is corruption, not compatibility.
+        // A required field missing altogether is corruption.
         let mut enc = minicbor::Encoder::new(Vec::new());
         enc.map(1).unwrap();
         enc.u8(4).unwrap().u32(50).unwrap();

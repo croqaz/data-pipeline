@@ -277,6 +277,7 @@ mod tests {
             bytes: 5,
             words: 1,
             uniq_words: 1,
+            lines: None,
             sentences: 1,
             uniq_chars: 4,
             vowel: 10_000,
@@ -284,12 +285,10 @@ mod tests {
             flags: 1,
             dict_hit: None,
             entropy: Some(9360),
-            compress: Some(6150),
-            top4gram: None,
             dup5gram: None,
-            dup10gram: None,
             mean_word_len: None,
             stop_words: None,
+            quality: Some(9_840),
         }
     }
 

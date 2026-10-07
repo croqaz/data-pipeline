@@ -431,13 +431,10 @@ mod tests {
 
     #[test]
     fn query_args() {
-        let cli = Cli::try_parse_from(["pipeline", "query", "--db", "d", "dup10gram > 3", "-s", "dup10gram", "--asc", "-l", "5", "--ids"])
-            .unwrap();
+        let cli =
+            Cli::try_parse_from(["pipeline", "query", "--db", "d", "dup5gram > 3", "-s", "dup5gram", "--asc", "-l", "5", "--ids"]).unwrap();
         let Command::Query(a) = cli.cmd else { panic!() };
-        assert_eq!(
-            (a.expr.as_deref(), a.sort.as_deref(), a.asc, a.limit, a.ids),
-            (Some("dup10gram > 3"), Some("dup10gram"), true, 5, true)
-        );
+        assert_eq!((a.expr.as_deref(), a.sort.as_deref(), a.asc, a.limit, a.ids), (Some("dup5gram > 3"), Some("dup5gram"), true, 5, true));
         let cli = Cli::try_parse_from(["pipeline", "query", "--db", "d", "--random", "--seed", "3", "--head", "100"]).unwrap();
         let Command::Query(a) = cli.cmd else { panic!() };
         assert_eq!((a.random, a.seed, a.head, a.limit, a.expr), (true, Some(3), Some(100), crate::query::DEFAULT_LIMIT, None));

@@ -10,7 +10,7 @@ struct Case {
     text: String,
 }
 
-#[derive(serde::Deserialize)]
+#[derive(Debug, PartialEq, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Expected {
     drop: Option<String>,
@@ -19,6 +19,7 @@ struct Expected {
     words: Option<u32>,
     #[serde(rename = "uniqWords")]
     uniq_words: Option<u32>,
+    lines: Option<u32>,
     sentences: Option<u32>,
     #[serde(rename = "uniqChars")]
     uniq_chars: Option<u32>,
@@ -29,9 +30,8 @@ struct Expected {
     mean_word_len: Option<u16>,
     #[serde(rename = "stopWords")]
     stop_words: Option<u16>,
-    top4gram: Option<u16>,
     dup5gram: Option<u16>,
-    dup10gram: Option<u16>,
+    quality: Option<u16>,
 }
 
 #[test]
@@ -50,29 +50,24 @@ fn golden() {
             Ok(f) => {
                 assert!(want.drop.is_none(), "{} should have been dropped", case.name);
                 let meta = f.to_meta(0, false);
-                let got = (f.len, f.bytes, f.words, f.uniq_words, f.sentences, f.uniq_chars, meta.vowel, meta.alpha, meta.entropy.unwrap());
-                let want_ngrams = &want;
-                let want = (
-                    want.len.unwrap(),
-                    want.bytes.unwrap(),
-                    want.words.unwrap(),
-                    want.uniq_words.unwrap(),
-                    want.sentences.unwrap(),
-                    want.uniq_chars.unwrap(),
-                    want.vowel.unwrap(),
-                    want.alpha.unwrap(),
-                    want.entropy.unwrap(),
-                );
-                assert!(meta.compress.is_some_and(|c| c > 0), "{}", case.name);
-                assert_eq!(got, want, "{}", case.name);
-                assert_eq!(
-                    (meta.mean_word_len, meta.stop_words),
-                    (want_ngrams.mean_word_len, want_ngrams.stop_words),
-                    "{} word length and stopwords",
-                    case.name
-                );
-                let ngrams = (meta.top4gram, meta.dup5gram, meta.dup10gram);
-                assert_eq!(ngrams, (want_ngrams.top4gram, want_ngrams.dup5gram, want_ngrams.dup10gram), "{} n-grams", case.name);
+                let got = Expected {
+                    drop: None,
+                    len: Some(meta.len),
+                    bytes: Some(meta.bytes),
+                    words: Some(meta.words),
+                    uniq_words: Some(meta.uniq_words),
+                    lines: meta.lines,
+                    sentences: Some(meta.sentences),
+                    uniq_chars: Some(meta.uniq_chars),
+                    vowel: Some(meta.vowel),
+                    alpha: Some(meta.alpha),
+                    entropy: meta.entropy,
+                    mean_word_len: meta.mean_word_len,
+                    stop_words: meta.stop_words,
+                    dup5gram: meta.dup5gram,
+                    quality: meta.quality,
+                };
+                assert_eq!(&got, want, "{}", case.name);
             }
         }
         checked += 1;

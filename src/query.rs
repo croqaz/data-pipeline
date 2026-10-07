@@ -252,7 +252,7 @@ mod tests {
     use crate::expr;
     use crate::store::{self, Record};
 
-    /// Keys [i; 16] with words = `words[i]`; record 4 has no dup10gram.
+    /// Keys [i; 16] with words = `words[i]`; record 4 has no dup5gram.
     fn store_with(words: &[u32]) -> (tempfile::TempDir, Box<dyn Store>, Sources) {
         let dir = tempfile::tempdir().unwrap();
         let store = store::open(&dir.path().join("db"), true).unwrap();
@@ -261,7 +261,7 @@ mod tests {
             .enumerate()
             .map(|(i, &w)| Record {
                 key: [i as u8 * 16; 16],
-                meta: Meta { words: w, dup10gram: (i != 4).then_some(w as u16 * 100), ..Default::default() }.encode(),
+                meta: Meta { words: w, dup5gram: (i != 4).then_some(w as u16 * 100), ..Default::default() }.encode(),
                 text: format!("doc {i}").into_bytes(),
                 extra: None,
                 replace: false,
@@ -314,8 +314,8 @@ mod tests {
         assert_eq!(firsts(&sel), vec![1, 5]);
         let sel = select(s, &sources, None, &opts(4, sort("words", true), None)).unwrap();
         assert_eq!(firsts(&sel), vec![1, 5, 0, 2], "7 ties: the smallest key first");
-        // record 4 has no dup10gram: left out and counted
-        let sel = select(s, &sources, None, &opts(10, sort("dup10gram", false), None)).unwrap();
+        // record 4 has no dup5gram: left out and counted
+        let sel = select(s, &sources, None, &opts(10, sort("dup5gram", false), None)).unwrap();
         assert_eq!((firsts(&sel), sel.without_feature), (vec![2, 3, 6, 0, 5, 1], 1));
         let f = expr::compile("words < 7").unwrap();
         let sel = select(s, &sources, Some(&f), &opts(10, sort("words", false), None)).unwrap();
@@ -323,7 +323,7 @@ mod tests {
         let sel = select(s, &sources, None, &opts(0, sort("words", false), None)).unwrap();
         assert_eq!((sel.keys.len(), sel.total), (0, Some(7)));
         let e = SortBy::parse("nope", false).unwrap_err().to_string();
-        assert!(e.contains("not a feature") && e.contains("dup10gram"), "{e}");
+        assert!(e.contains("not a feature") && e.contains("dup5gram"), "{e}");
     }
 
     #[test]
@@ -346,18 +346,18 @@ mod tests {
         let first: serde_json::Value = serde_json::from_str(j.lines().next().unwrap()).unwrap();
         assert_eq!((first["text"].as_str(), first["words"].as_u64()), (Some("doc 2"), Some(7)));
         assert_eq!(summary(&sel, &o), "Showed 2 of 3 matches, highest words first; scanned 3 documents.\n");
-        let asc = opts(2, Some(SortBy::parse("dup10gram", true).unwrap()), None);
+        let asc = opts(2, Some(SortBy::parse("dup5gram", true).unwrap()), None);
         let missing = Selection { keys: vec![], positions: vec![], scanned: 9, total: Some(4), without_feature: 2 };
         assert_eq!(
             summary(&missing, &asc),
-            "Showed 0 of 4 matches, lowest dup10gram first; scanned 9 documents.\n2 matches have no dup10gram and were left out; run `recompute` to fill it.\n"
+            "Showed 0 of 4 matches, lowest dup5gram first; scanned 9 documents.\n2 matches have no dup5gram and were left out; run `recompute` to fill it.\n"
         );
         // a missing sort value prints as "-"
         let gap = Selection { keys: vec![[4 * 16; 16]], ..Default::default() };
         let (_d2, store2, sources2) = store_with(&[1, 1, 1, 1, 1]);
         let mut out = Vec::new();
         print(store2.as_ref(), &sources2, &gap, asc.sort, Output::Readable(Clip::Head(2)), &mut out).unwrap();
-        assert!(String::from_utf8(out).unwrap().starts_with("=== Match 1 of 1  dup10gram - ===\n"));
+        assert!(String::from_utf8(out).unwrap().starts_with("=== Match 1 of 1  dup5gram - ===\n"));
         let unsorted = opts(2, None, None);
         let full = Selection { keys: vec![[0; 16], [1; 16]], scanned: 40, ..Default::default() };
         let in_order = select(s, &sources, None, &unsorted).unwrap();
