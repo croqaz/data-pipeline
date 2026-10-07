@@ -120,6 +120,8 @@ pub fn scan<A: Send>(
 pub struct FeatureAcc {
     pub present: u64,
     pub sum: f64,
+    /// Exact sum, for the totals of the count features.
+    pub total: u64,
     pub min: u64,
     pub max: u64,
     pub hist: Histogram<u64>,
@@ -127,12 +129,13 @@ pub struct FeatureAcc {
 
 impl FeatureAcc {
     fn new() -> Self {
-        Self { present: 0, sum: 0.0, min: u64::MAX, max: 0, hist: Histogram::new(3).expect("valid sigfig") }
+        Self { present: 0, sum: 0.0, total: 0, min: u64::MAX, max: 0, hist: Histogram::new(3).expect("valid sigfig") }
     }
 
     fn add(&mut self, v: u64) {
         self.present += 1;
         self.sum += v as f64;
+        self.total = self.total.saturating_add(v);
         self.min = self.min.min(v);
         self.max = self.max.max(v);
         self.hist.record(v).expect("auto-resizing histogram accepts any u64");
@@ -141,6 +144,7 @@ impl FeatureAcc {
     fn merge(&mut self, o: &FeatureAcc) {
         self.present += o.present;
         self.sum += o.sum;
+        self.total = self.total.saturating_add(o.total);
         self.min = self.min.min(o.min);
         self.max = self.max.max(o.max);
         self.hist.add(&o.hist).expect("histograms share a configuration");
@@ -211,6 +215,39 @@ pub fn collect(store: &dyn Store, sources: &Sources, cfg: &ScanConfig<'_>) -> Re
     Ok(StatsReport { scanned, matched, acc })
 }
 
+/// Features whose sum over the matched documents means something, with the
+/// unit of the readable scale printed next to the exact total.
+const TOTALS: [(&str, &str); 5] =
+    [("len", "characters"), ("bytes", ""), ("words", "words"), ("lines", "lines"), ("sentences", "sentences")];
+
+/// `131_108_712_912` -> `"131.1 billion characters"`; `None` under a million,
+/// where the exact number is already readable. An empty unit means bytes.
+fn readable(n: u64, unit: &str) -> Option<String> {
+    let x = n as f64;
+    if unit.is_empty() {
+        let (div, name) = if x >= 1024f64.powi(4) {
+            (1024f64.powi(4), "TiB")
+        } else if x >= 1024f64.powi(3) {
+            (1024f64.powi(3), "GiB")
+        } else if x >= 1024f64.powi(2) {
+            (1024f64.powi(2), "MiB")
+        } else {
+            return None;
+        };
+        return Some(format!("{} {name}", fmt_num(x / div, 1)));
+    }
+    let (div, name) = if x >= 1e12 {
+        (1e12, "trillion")
+    } else if x >= 1e9 {
+        (1e9, "billion")
+    } else if x >= 1e6 {
+        (1e6, "million")
+    } else {
+        return None;
+    };
+    Some(format!("{} {name} {unit}", fmt_num(x / div, 1)))
+}
+
 pub fn render(rep: &StatsReport, sources: &Sources, expr: Option<&str>) -> String {
     let mut s = String::new();
     s.push_str(&format!("| Scanned: {} documents\n", fmt_int(rep.scanned)));
@@ -259,6 +296,25 @@ pub fn render(rep: &StatsReport, sources: &Sources, expr: Option<&str>) -> Strin
     s.push_str(&format!("|{}|\n", widths.iter().map(|w| "-".repeat(w + 2)).collect::<Vec<_>>().join("|")));
     for r in &rows {
         s.push_str(&fmt_row(r));
+    }
+    let totals: Vec<(&str, String, Option<String>)> = TOTALS
+        .iter()
+        .filter_map(|&(name, unit)| {
+            let acc = &rep.acc.features[crate::meta::feature_index(name).expect("totals name a feature")];
+            (acc.present > 0).then(|| (name, fmt_int(acc.total), readable(acc.total, unit)))
+        })
+        .collect();
+    if !totals.is_empty() {
+        let name_w = totals.iter().map(|t| t.0.len()).max().unwrap_or(0) + 1;
+        let num_w = totals.iter().map(|t| t.1.len()).max().unwrap_or(0);
+        s.push_str("|\n| Totals:\n");
+        for (name, n, human) in &totals {
+            let label = format!("{name}:");
+            match human {
+                Some(h) => s.push_str(&format!("| - {label:<name_w$} {n:>num_w$}  ({h})\n")),
+                None => s.push_str(&format!("| - {label:<name_w$} {n:>num_w$}\n")),
+            }
+        }
     }
     s
 }
@@ -329,6 +385,25 @@ mod tests {
     }
 
     #[test]
+    fn totals_add_exactly_and_read_at_scale() {
+        let mut a = FeatureAcc::new();
+        a.add(u64::from(u32::MAX));
+        let mut b = FeatureAcc::new();
+        b.add(u64::from(u32::MAX));
+        b.add(3);
+        a.merge(&b);
+        assert_eq!(a.total, 2 * u64::from(u32::MAX) + 3);
+        assert_eq!(readable(999_999, "words"), None);
+        assert_eq!(readable(1_000_000, "words").as_deref(), Some("1.0 million words"));
+        assert_eq!(readable(131_108_712_912, "characters").as_deref(), Some("131.1 billion characters"));
+        assert_eq!(readable(2_500_000_000_000, "lines").as_deref(), Some("2.5 trillion lines"));
+        assert_eq!(readable(1_000_000, ""), None, "under a MiB");
+        assert_eq!(readable(3 << 20, "").as_deref(), Some("3.0 MiB"));
+        assert_eq!(readable(131_212_345_678, "").as_deref(), Some("122.2 GiB"));
+        assert_eq!(readable(5 << 40, "").as_deref(), Some("5.0 TiB"));
+    }
+
+    #[test]
     fn render_table_shape() {
         let mut acc = StatsAcc::new();
         acc.add(&Meta { source: 0, words: 50, vowel: 9950, ..Default::default() });
@@ -342,8 +417,15 @@ mod tests {
         assert!(s.contains("| - cli: 1"));
         assert!(s.contains("| vowel"));
         assert!(s.contains("99.50"));
+        let totals: Vec<Vec<&str>> = s.split("| Totals:\n").nth(1).unwrap().lines().map(|l| l.split_whitespace().collect()).collect();
+        assert_eq!(
+            totals,
+            [["|", "-", "len:", "0"], ["|", "-", "bytes:", "0"], ["|", "-", "words:", "50"], ["|", "-", "sentences:", "0"]],
+            "{s}"
+        );
         let empty = render(&StatsReport { scanned: 0, matched: 0, acc: StatsAcc::new() }, &sources, None);
         assert!(!empty.contains("Matched"));
         assert!(!empty.contains("Sources"));
+        assert!(!empty.contains("Totals"));
     }
 }

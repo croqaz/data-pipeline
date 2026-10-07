@@ -83,6 +83,11 @@ a btrfs volume that compresses by itself.
 labels, the feature list and schema, then per-keyspace facts from the
 engine (table and blob file counts, files at level 0, cache size).
 
+`stats` scans the documents matching EXPR (all of them without one) and
+prints the count per source, a table of every feature (present, mean, min,
+P5, P50, P95, max), then the totals of `len`, `bytes`, `words`, `lines`
+and `sentences`.
+
 `show` prints a document: id, source, every feature, the stored metadata,
 then the text after a rule. An id is 32 hex characters, or an even-length
 prefix of at least 4 that matches exactly one document; an ambiguous
@@ -400,7 +405,7 @@ src/hash.rs        16-byte BLAKE3 key of normalized text
 src/jsonl/         chunked reader (.gz/.zst aware)
 src/store/         Store trait, the fjall engine, a null store for dry runs
 src/import.rs      reader -> workers -> writer pipeline
-src/stats.rs       parallel meta scan, histograms, table
+src/stats.rs       parallel meta scan, histograms, table, totals
 src/count.rs
 src/query.rs       first N matches in key order, or the top N by a feature
 src/export/        header templates, field emitter, sharded sink, orchestration
