@@ -22,6 +22,7 @@ pub mod recompute;
 pub mod show;
 pub mod stats;
 pub mod store;
+pub mod tokenizer;
 pub mod util;
 
 use std::ffi::OsString;
@@ -123,6 +124,7 @@ fn cmd_import(a: ImportArgs, out: &mut dyn Write, err: &mut (dyn Write + Send)) 
     opts.chunk_bytes = a.chunk_mb.max(1) << 20;
     opts.batch_size = a.batch_size.max(1);
     opts.dry_run = a.dry_run;
+    opts.tokenizer = a.tokenizer;
     if opts.max_len <= features::MIN_LEN {
         return Err(Error::Usage(format!("--max-len must be greater than {}", features::MIN_LEN)));
     }
@@ -327,6 +329,7 @@ fn cmd_recompute(a: RecomputeArgs, out: &mut dyn Write, err: &mut (dyn Write + S
         dry_run: a.dry_run,
         force: a.force,
         progress_every: recompute::PROGRESS_EVERY,
+        tokenizer: a.tokenizer,
     };
     let rep = recompute::recompute(store.as_ref(), &opts, err)?;
     write!(out, "{}", rep.render())?;

@@ -96,6 +96,11 @@ pub struct ImportArgs {
     /// Parse and count everything, write nothing, never open the store.
     #[arg(long)]
     pub dry_run: bool,
+    /// Count tokens with the tokenizer.json in this folder. The first import
+    /// into a new store makes it the store's tokenizer; after that, imports
+    /// count with the store's own copy and this may be left out.
+    #[arg(long, value_name = "DIR")]
+    pub tokenizer: Option<PathBuf>,
     /// JSONL files (.jsonl, .jsonl.gz, .jsonl.zst).
     #[arg(required = true)]
     pub inputs: Vec<PathBuf>,
@@ -321,6 +326,10 @@ pub struct RecomputeArgs {
     /// Records per atomic store write.
     #[arg(long, default_value_t = crate::recompute::DEFAULT_BATCH)]
     pub batch_size: usize,
+    /// Switch the store to the tokenizer.json in this folder and recount
+    /// every document's tokens with it.
+    #[arg(long, value_name = "DIR")]
+    pub tokenizer: Option<PathBuf>,
 }
 
 #[cfg(test)]

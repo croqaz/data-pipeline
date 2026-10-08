@@ -197,10 +197,15 @@ impl Default for StatsAcc {
     }
 }
 
+#[derive(Default)]
 pub struct StatsReport {
     pub scanned: u64,
     pub matched: u64,
     pub acc: StatsAcc,
+    /// The store's tokenizer name, for the tokens total.
+    pub tokenizer: Option<String>,
+    /// A tokenizer switch did not finish: the tokens total mixes two tokenizers.
+    pub mixed_tokens: bool,
 }
 
 pub fn collect(store: &dyn Store, sources: &Sources, cfg: &ScanConfig<'_>) -> Result<StatsReport> {
@@ -212,13 +217,15 @@ pub fn collect(store: &dyn Store, sources: &Sources, cfg: &ScanConfig<'_>) -> Re
     for a in &accs {
         acc.merge(a);
     }
-    Ok(StatsReport { scanned, matched, acc })
+    let state = crate::tokenizer::State::read(store)?;
+    Ok(StatsReport { scanned, matched, acc, tokenizer: state.current.map(|t| t.name), mixed_tokens: state.pending.is_some() })
 }
 
 /// Features whose sum over the matched documents means something, with the
 /// unit of the readable scale printed next to the exact total.
-const TOTALS: [(&str, &str); 5] =
-    [("len", "characters"), ("bytes", ""), ("words", "words"), ("lines", "lines"), ("sentences", "sentences")];
+/// `tokens` is shown in the store tokenizer's units, `t-v5 tokens`.
+const TOTALS: [(&str, &str); 6] =
+    [("len", "characters"), ("bytes", ""), ("tokens", "tokens"), ("words", "words"), ("lines", "lines"), ("sentences", "sentences")];
 
 /// `131_108_712_912` -> `"131.1 billion characters"`; `None` under a million,
 /// where the exact number is already readable. An empty unit means bytes.
@@ -301,7 +308,11 @@ pub fn render(rep: &StatsReport, sources: &Sources, expr: Option<&str>) -> Strin
         .iter()
         .filter_map(|&(name, unit)| {
             let acc = &rep.acc.features[crate::meta::feature_index(name).expect("totals name a feature")];
-            (acc.present > 0).then(|| (name, fmt_int(acc.total), readable(acc.total, unit)))
+            let unit = match (name, &rep.tokenizer) {
+                ("tokens", Some(t)) => format!("{t} tokens"),
+                _ => unit.to_string(),
+            };
+            (acc.present > 0 && (name != "tokens" || acc.total > 0)).then(|| (name, fmt_int(acc.total), readable(acc.total, &unit)))
         })
         .collect();
     if !totals.is_empty() {
@@ -313,6 +324,9 @@ pub fn render(rep: &StatsReport, sources: &Sources, expr: Option<&str>) -> Strin
             match human {
                 Some(h) => s.push_str(&format!("| - {label:<name_w$} {n:>num_w$}  ({h})\n")),
                 None => s.push_str(&format!("| - {label:<name_w$} {n:>num_w$}\n")),
+            }
+            if *name == "tokens" && rep.mixed_tokens {
+                s.push_str("|   (mixed: a tokenizer switch did not finish; run `recompute`)\n");
             }
         }
     }
@@ -410,7 +424,7 @@ mod tests {
         let mut sources = Sources::default();
         let fake = crate::store::NullStore::default();
         sources.intern("cli", &fake).unwrap();
-        let rep = StatsReport { scanned: 1, matched: 1, acc };
+        let rep = StatsReport { scanned: 1, matched: 1, acc, ..Default::default() };
         let s = render(&rep, &sources, Some("words > 1"));
         assert!(s.contains("| Scanned: 1 documents"));
         assert!(s.contains("| Matched: 1 (words > 1)"));
@@ -423,7 +437,7 @@ mod tests {
             [["|", "-", "len:", "0"], ["|", "-", "bytes:", "0"], ["|", "-", "words:", "50"], ["|", "-", "sentences:", "0"]],
             "{s}"
         );
-        let empty = render(&StatsReport { scanned: 0, matched: 0, acc: StatsAcc::new() }, &sources, None);
+        let empty = render(&StatsReport::default(), &sources, None);
         assert!(!empty.contains("Matched"));
         assert!(!empty.contains("Sources"));
         assert!(!empty.contains("Totals"));

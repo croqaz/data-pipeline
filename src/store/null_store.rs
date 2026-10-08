@@ -1,6 +1,7 @@
 //! A store that writes nothing. Used by `import --dry-run` to measure and
 //! validate without touching disk, and by tests.
 
+use std::collections::HashMap;
 use std::sync::Mutex;
 
 use crate::error::Result;
@@ -11,6 +12,7 @@ use super::{Keyspace, KvIter, Record, ScanFn, Store};
 #[derive(Default)]
 pub struct NullStore {
     pub sources: Mutex<Vec<(u16, String)>>,
+    pub settings: Mutex<HashMap<String, Vec<u8>>>,
 }
 
 impl Store for NullStore {
@@ -61,6 +63,17 @@ impl Store for NullStore {
         self.sources.lock().expect("lock").retain(|(i, _)| *i != id);
         Ok(())
     }
+    fn setting(&self, name: &str) -> Result<Option<Vec<u8>>> {
+        Ok(self.settings.lock().expect("lock").get(name).cloned())
+    }
+    fn put_setting(&self, name: &str, value: Option<&[u8]>) -> Result<()> {
+        let mut s = self.settings.lock().expect("lock");
+        match value {
+            Some(v) => s.insert(name.to_string(), v.to_vec()),
+            None => s.remove(name),
+        };
+        Ok(())
+    }
     fn persist(&self) -> Result<()> {
         Ok(())
     }
@@ -96,5 +109,9 @@ mod tests {
         e.delete_batch(&[[0; 16]]).unwrap();
         e.compact().unwrap();
         assert!(e.details().unwrap().is_empty());
+        e.put_setting("k", Some(b"v")).unwrap();
+        assert_eq!(e.setting("k").unwrap().as_deref(), Some(b"v".as_slice()));
+        e.put_setting("k", None).unwrap();
+        assert_eq!(e.setting("k").unwrap(), None);
     }
 }

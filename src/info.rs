@@ -13,6 +13,8 @@ pub struct InfoReport {
     pub approx_docs: u64,
     pub disk: u64,
     pub sources: Vec<String>,
+    /// The store's tokenizer, for example `t-v5 (blake3 1a2b3c4d5e6f)`, or `none`.
+    pub tokenizer: String,
     pub details: Vec<(String, String)>,
 }
 
@@ -25,6 +27,7 @@ impl InfoReport {
         let labels = if self.sources.is_empty() { "none".to_string() } else { self.sources.join(", ") };
         s.push_str(&format!("Sources:    {} ({})\n", self.sources.len(), labels));
         s.push_str(&format!("Features:   {} (schema {})\n", feature_names().join(", "), SCHEMA_VERSION));
+        s.push_str(&format!("Tokenizer:  {}\n", self.tokenizer));
         for (k, v) in &self.details {
             s.push_str(&format!("{:<12}{v}\n", format!("{k}:")));
         }
@@ -42,6 +45,7 @@ pub fn info(store: &dyn Store, dir: &Path) -> Result<InfoReport> {
         approx_docs: store.approx_count()?,
         disk: store.disk_size()?,
         sources: labels.into_iter().map(|(_, n)| n).collect(),
+        tokenizer: crate::tokenizer::State::read(store)?.describe(),
         details: store.details()?,
     })
 }
@@ -89,6 +93,7 @@ mod tests {
             approx_docs: 1234,
             disk: 2_500_000,
             sources: vec!["a".into(), "b".into()],
+            tokenizer: "none".into(),
             details: vec![("meta".into(), "1 MB".into())],
         };
         let s = rep.render();

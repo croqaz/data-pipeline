@@ -5,7 +5,8 @@
 //! Every document lives in three keyspaces under the same 16-byte key:
 //! `meta` (CBOR features), `text` (raw UTF-8) and `extra` (raw JSON object of
 //! the metadata fields that rode along, absent when there were none). Two
-//! small keyspaces hold the interned source labels and the schema marker.
+//! small keyspaces hold the interned source labels and the store-wide
+//! settings (the tokenizer `tokens` is counted with).
 
 pub mod fjall_store;
 pub mod null_store;
@@ -93,6 +94,10 @@ pub trait Store: Send + Sync {
     fn sources(&self) -> Result<Vec<(u16, String)>>;
     fn put_source(&self, id: u16, label: &str) -> Result<()>;
     fn delete_source(&self, id: u16) -> Result<()>;
+    /// A store-wide setting, by name.
+    fn setting(&self, name: &str) -> Result<Option<Vec<u8>>>;
+    /// Write (`Some`) or remove (`None`) a store-wide setting.
+    fn put_setting(&self, name: &str, value: Option<&[u8]>) -> Result<()>;
     /// Make everything written so far durable.
     fn persist(&self) -> Result<()>;
     fn disk_size(&self) -> Result<u64>;
@@ -408,7 +413,7 @@ mod tests {
 
     #[test]
     fn sources_intern_and_persist() {
-        let fake = Empty { sources: std::sync::Mutex::new(vec![(0, "cli".into())]) };
+        let fake = Empty { sources: std::sync::Mutex::new(vec![(0, "cli".into())]), ..Default::default() };
         let mut s = Sources::load(&fake).unwrap();
         assert_eq!(s.len(), 1);
         assert!(!s.is_empty());

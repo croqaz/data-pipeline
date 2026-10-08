@@ -675,7 +675,7 @@ fn info_show_compact_and_check() {
         );
         assert!(
             out.contains(
-                "Features:   len, bytes, uniqChars, words, uniqWords, meanWordLen, stopWords, lines, sentences, vowel, alpha, dictHit, dup5gram, entropy, quality (schema 1)\n"
+                "Features:   len, bytes, tokens, uniqChars, words, uniqWords, meanWordLen, stopWords, lines, sentences, vowel, alpha, dictHit, dup5gram, entropy, quality (schema 1)\n"
             ),
             "{out}"
         );
@@ -1038,4 +1038,142 @@ fn extra_renames_keys() {
     let (code, _, err) = run(&["import", "--db", dbs, "-e", "title,Publication=title", f.to_str().unwrap()]);
     assert_ne!(code, 0);
     assert!(err.contains("two keys are stored as \"title\""), "{err}");
+}
+
+fn tok(name: &str) -> String {
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures").join(name).display().to_string()
+}
+
+/// The `tokens` of every document, by text prefix `[n]`.
+fn token_counts(db: &str) -> Vec<(String, Option<u64>)> {
+    let (code, out, _) = run(&["export", "--db", db, "-o", "-", "-f", "text,tokens"]);
+    assert_eq!(code, 0);
+    let mut v: Vec<(String, Option<u64>)> = out
+        .lines()
+        .map(|l| {
+            let j: serde_json::Value = serde_json::from_str(l).unwrap();
+            (j["text"].as_str().unwrap()[..3].to_string(), j["tokens"].as_u64())
+        })
+        .collect();
+    v.sort();
+    v
+}
+
+#[test]
+fn tokenizer_is_set_once_and_mismatches_are_refused() {
+    let dir = tempfile::tempdir().unwrap();
+    let first = write(dir.path(), "first.jsonl", &[doc(1), doc(2)]);
+    let second = write(dir.path(), "second.jsonl", &[doc(3)]);
+    let db_path = dir.path().join("db");
+    let db = db_path.to_str().unwrap();
+    let (a, b) = (tok("tok-a"), tok("tok-b"));
+
+    // a bad path fails before any store is created
+    let (code, _, err) = run(&["import", "--db", db, "--tokenizer", &format!("{a}-missing"), first.to_str().unwrap()]);
+    assert_eq!(code, 2);
+    assert!(err.contains("tok-a-missing does not exist; pass a folder that contains a tokenizer.json"), "{err}");
+    assert!(!db_path.exists());
+
+    // the first import sets the store's tokenizer; HF counts "[n] PROSE" as 141 with tok-a
+    let (code, out, err) = run(&["import", "--db", db, "--tokenizer", &a, first.to_str().unwrap()]);
+    assert_eq!(code, 0, "{err}");
+    assert!(err.contains("Counting tokens with tok-a (blake3 "), "{err}");
+    assert!(out.contains("Tokens: counted with tok-a (blake3 ") && out.contains(", now the store's tokenizer\n"), "{out}");
+    assert_eq!(token_counts(db), vec![("[1]".into(), Some(141)), ("[2]".into(), Some(141))]);
+    let (_, out, _) = run(&["info", "--db", db]);
+    assert!(out.contains("\nTokenizer:  tok-a (blake3 "), "{out}");
+
+    // a different tokenizer is refused with both names and the way out; nothing is written
+    let (code, _, err) = run(&["import", "--db", db, "--tokenizer", &b, second.to_str().unwrap()]);
+    assert_eq!(code, 2);
+    assert!(err.starts_with(&format!("Error: tokenizer mismatch: the store {db} counts tokens with tok-a (blake3 ")), "{err}");
+    assert!(err.contains(&format!("and --tokenizer {b} is tok-b (blake3 ")), "{err}");
+    assert!(err.contains("Either leave out --tokenizer to count with the store's tok-a"), "{err}");
+    assert!(err.contains(&format!("pipeline recompute --db {db} --tokenizer {b}")), "{err}");
+    assert_eq!(token_counts(db).len(), 2);
+
+    // leaving the flag out counts with the store's own copy
+    let (code, out, _) = run(&["import", "--db", db, second.to_str().unwrap()]);
+    assert_eq!(code, 0);
+    assert!(out.contains(", the store's tokenizer\n"), "{out}");
+    assert_eq!(token_counts(db)[2], ("[3]".into(), Some(141)));
+
+    // tokens is a feature like any other
+    let (_, out, _) = run(&["count", "--db", db, "tokens == 141 && bytes / tokens > 1"]);
+    assert_eq!(out, "3 / 3 documents match (100.000%).\n");
+    let (_, out, _) = run(&["stats", "--db", db]);
+    assert!(out.contains("| tokens "), "{out}");
+    assert!(out.contains("| - tokens:    423\n"), "{out}");
+    let (code, _, _) = run(&["check", "--db", db, "--deep"]);
+    assert_eq!(code, 0);
+}
+
+#[test]
+fn recompute_switches_the_tokenizer() {
+    let dir = tempfile::tempdir().unwrap();
+    let input = write(dir.path(), "in.jsonl", &[doc(1), doc(2)]);
+    let db_path = dir.path().join("db");
+    let db = db_path.to_str().unwrap();
+    let (a, b) = (tok("tok-a"), tok("tok-b"));
+    run(&["import", "--db", db, "--tokenizer", &a, input.to_str().unwrap()]);
+
+    // a dry run changes nothing
+    let (code, out, _) = run(&["recompute", "--db", db, "--tokenizer", &b, "--dry-run"]);
+    assert_eq!(code, 0);
+    assert!(out.contains("Tokenizer: would switch from tok-a (blake3 ") && out.contains("Dry run: nothing was written."), "{out}");
+    assert_eq!(token_counts(db)[0].1, Some(141));
+
+    // the switch recounts with tok-b (131 by HF) and makes it the store's
+    let (code, out, err) = run(&["recompute", "--db", db, "--tokenizer", &b]);
+    assert_eq!(code, 0, "{err}");
+    assert!(err.contains("Switching the tokenizer from tok-a (blake3 "), "{err}");
+    assert!(out.contains("Tokenizer: switched from tok-a (blake3 ") && out.contains("to tok-b (blake3 "), "{out}");
+    assert_eq!(token_counts(db), vec![("[1]".into(), Some(131)), ("[2]".into(), Some(131))]);
+    let (_, out, _) = run(&["info", "--db", db]);
+    assert!(out.contains("\nTokenizer:  tok-b (blake3 "), "{out}");
+    let (code, out, _) = run(&["check", "--db", db, "--deep"]);
+    assert_eq!(code, 0, "{out}");
+
+    // and now tok-a is the one refused
+    let (code, _, err) = run(&["import", "--db", db, "--tokenizer", &a, input.to_str().unwrap()]);
+    assert_eq!(code, 2);
+    assert!(err.contains("the store") && err.contains("counts tokens with tok-b"), "{err}");
+}
+
+#[test]
+fn stores_without_a_tokenizer_keep_working() {
+    let dir = tempfile::tempdir().unwrap();
+    let input = write(dir.path(), "in.jsonl", &[doc(1), doc(2), doc(3)]);
+    let more = write(dir.path(), "more.jsonl", &[doc(4)]);
+    let db_path = dir.path().join("db");
+    let db = db_path.to_str().unwrap();
+    let a = tok("tok-a");
+
+    let (code, out, _) = run(&["import", "--db", db, input.to_str().unwrap()]);
+    assert_eq!(code, 0);
+    assert!(!out.contains("Tokens:"), "{out}");
+    assert!(token_counts(db).iter().all(|(_, t)| t.is_none()));
+    let (_, out, _) = run(&["info", "--db", db]);
+    assert!(out.contains("\nTokenizer:  none\n"), "{out}");
+    let (_, out, _) = run(&["stats", "--db", db]);
+    assert!(!out.contains("- tokens:"), "no tokens total without counts: {out}");
+
+    // adding a tokenizer to a store that has documents is a recompute, not an import
+    let (code, _, err) = run(&["import", "--db", db, "--tokenizer", &a, more.to_str().unwrap()]);
+    assert_eq!(code, 2);
+    assert!(err.contains(&format!("the store {db} already holds 3 documents without token counts")), "{err}");
+    assert!(err.contains(&format!("pipeline recompute --db {db} --tokenizer {a}\nthen run this import again.")), "{err}");
+    assert_eq!(token_counts(db).len(), 3, "nothing imported");
+
+    let (code, out, _) = run(&["recompute", "--db", db, "--tokenizer", &a]);
+    assert_eq!(code, 0);
+    assert!(out.contains("Tokenizer: switched from no tokenizer to tok-a"), "{out}");
+    let (code, _, _) = run(&["import", "--db", db, more.to_str().unwrap()]);
+    assert_eq!(code, 0);
+    assert!(token_counts(db).iter().all(|(_, t)| *t == Some(141)));
+
+    // a dry run counts with the given tokenizer without a store
+    let (code, out, _) = run(&["import", "--db", "unused", "--dry-run", "--tokenizer", &a, input.to_str().unwrap()]);
+    assert_eq!(code, 0);
+    assert!(out.contains("Tokens: counted with tok-a (blake3 ") && !out.contains("store's tokenizer"), "{out}");
 }

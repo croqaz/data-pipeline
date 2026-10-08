@@ -35,6 +35,8 @@ zstd = { version = "0.14", features = ["zstdmt"] }
 flate2 = { version = "1.1", default-features = false, features = ["zlib-rs"] }
 libc = "0.2"
 tiny_http = "0.12"
+# Pinned: token counts are stored, so a new version must not change them unseen.
+tokie = "=0.1.4"
 
 [dev-dependencies]
 proptest = "1"

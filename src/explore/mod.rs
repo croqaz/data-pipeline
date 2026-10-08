@@ -303,6 +303,7 @@ impl Explorer {
                 "sources": labels.into_iter().map(|(_, n)| n).collect::<Vec<_>>(),
                 "features": features,
                 "schema": SCHEMA_VERSION,
+                "tokenizer": crate::tokenizer::State::read(self.store.as_ref())?.describe(),
                 "details": details,
             }),
         ))

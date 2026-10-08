@@ -7,7 +7,9 @@
 //! absent against the `has_extra` flag, and source ids without a label.
 //! `--deep` also reads every text and checks that it is UTF-8, that its
 //! BLAKE3 key matches, and that the stored features equal a fresh
-//! computation (so a changed scanner shows up as "stale"). Its only write:
+//! computation (so a changed scanner shows up as "stale"; `tokens` is
+//! recounted with the store's tokenizer). A tokenizer switch that did not
+//! finish is reported as a problem of the whole store. Its only write:
 //! after a pass with no corrupt meta, source names no document uses are
 //! removed.
 
@@ -20,6 +22,7 @@ use crate::hash::{Key, doc_key, key_to_hex};
 use crate::meta::Meta;
 use crate::stats::range_for;
 use crate::store::{self, Keyspace, KvIter, Sources, Store};
+use crate::tokenizer;
 use crate::util::{fmt_int, fmt_num};
 
 #[derive(Debug, Clone)]
@@ -144,11 +147,13 @@ pub struct CheckReport {
     pub removed_sources: Vec<String>,
     pub deep: bool,
     pub secs: f64,
+    /// The target of a tokenizer switch that did not finish.
+    pub unfinished_switch: Option<String>,
 }
 
 impl CheckReport {
     pub fn problems(&self) -> u64 {
-        self.acc.problems()
+        self.acc.problems() + u64::from(self.unfinished_switch.is_some())
     }
 
     pub fn render(&self) -> String {
@@ -176,6 +181,11 @@ impl CheckReport {
         ));
         if !self.removed_sources.is_empty() {
             s.push_str(&format!("  Unused sources removed: {}\n", self.removed_sources.join(", ")));
+        }
+        if let Some(to) = &self.unfinished_switch {
+            s.push_str(&format!(
+                "  unfinished tokenizer switch to {to}: some documents are counted with each tokenizer; run `recompute` to finish it\n"
+            ));
         }
         for p in Problem::ALL {
             let c = self.acc.counts[p.index()];
@@ -245,14 +255,21 @@ fn deep_check(key: &Key, text: &[u8], meta: Option<&Meta>, acc: &mut Acc, scratc
     }
 }
 
-fn check_range(store: &dyn Store, sources: &Sources, opts: &CheckOptions, lo: &Key, hi: Option<&Key>) -> Result<Acc> {
+fn check_range(
+    store: &dyn Store,
+    sources: &Sources,
+    opts: &CheckOptions,
+    tok: Option<&tokenizer::Loaded>,
+    lo: &Key,
+    hi: Option<&Key>,
+) -> Result<Acc> {
     let mut acc = Acc::new(opts.examples);
     let mut text_it = store.iter(Keyspace::Text, lo, hi, opts.deep)?.peekable();
     let mut extra_it = store.iter(Keyspace::Extra, lo, hi, false)?.peekable();
     let mut text_total = 0u64;
     let mut extra_total = 0u64;
     let mut scratch = Vec::new();
-    let mut fscratch = features::Scratch::default();
+    let mut fscratch = features::Scratch { tokenizer: tok.map(|t| t.tokenizer.clone()), ..features::Scratch::default() };
     store.scan_meta(lo, hi, &mut |key, bytes| {
         acc.meta += 1;
         let meta = match Meta::decode(bytes) {
@@ -294,10 +311,15 @@ fn check_range(store: &dyn Store, sources: &Sources, opts: &CheckOptions, lo: &K
 pub fn check(store: &dyn Store, sources: &Sources, opts: &CheckOptions) -> Result<CheckReport> {
     let t0 = Instant::now();
     let threads = opts.threads.clamp(1, 256);
+    let state = tokenizer::State::read(store)?;
+    // Deep checks recount with the tokenizer the store is (or is becoming)
+    // counted with; documents a stopped switch did not reach read as stale.
+    let tok = if opts.deep { state.pending.as_ref().or(state.current.as_ref()).map(|t| t.load()).transpose()? } else { None };
     let results: Vec<Result<Acc>> = std::thread::scope(|s| {
+        let tok = tok.as_ref();
         let handles: Vec<_> = (0..threads)
             .filter_map(|t| range_for(t, threads))
-            .map(|(lo, hi)| s.spawn(move || check_range(store, sources, opts, &lo, hi.as_ref())))
+            .map(|(lo, hi)| s.spawn(move || check_range(store, sources, opts, tok, &lo, hi.as_ref())))
             .collect();
         handles.into_iter().map(|h| h.join().expect("check thread panicked")).collect()
     });
@@ -309,7 +331,14 @@ pub fn check(store: &dyn Store, sources: &Sources, opts: &CheckOptions) -> Resul
     let removed_sources =
         if acc.counts[Problem::CorruptMeta.index()] == 0 { store::remove_unused_sources(store, &acc.used_sources)? } else { Vec::new() };
     let sources = sources.len() - removed_sources.len();
-    Ok(CheckReport { acc, sources, removed_sources, deep: opts.deep, secs: t0.elapsed().as_secs_f64() })
+    Ok(CheckReport {
+        acc,
+        sources,
+        removed_sources,
+        deep: opts.deep,
+        secs: t0.elapsed().as_secs_f64(),
+        unfinished_switch: state.pending.as_ref().map(tokenizer::TokenizerSpec::label),
+    })
 }
 
 /// The error a failed check turns into, after the report is printed.
@@ -444,6 +473,7 @@ How vexingly quick daft zebras jump. The five boxing wizards jump quickly.";
             sources: 1,
             removed_sources: vec![],
             deep: false,
+            unfinished_switch: None,
             secs: 0.0,
         };
         assert!(one.render().starts_with("Check: 1 problem in 0 documents"), "{}", one.render());

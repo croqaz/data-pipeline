@@ -23,6 +23,7 @@ use crate::jsonl::reader::window;
 use crate::jsonl::{Chunk, Chunker, open_input};
 use crate::meta::Meta;
 use crate::store::{self, Record, Sources, Store};
+use crate::tokenizer::{self, TokenizerSpec};
 use crate::util::{fmt_int, fmt_num, fmt_rate};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
@@ -56,6 +57,9 @@ pub struct ImportOptions {
     pub batch_size: usize,
     /// Parse, compute and count, but write nothing and never open a store.
     pub dry_run: bool,
+    /// `--tokenizer`: count `tokens` with this tokenizer folder. A store that
+    /// already has a tokenizer counts with its own without this.
+    pub tokenizer: Option<PathBuf>,
     pub inputs: Vec<PathBuf>,
 }
 
@@ -77,6 +81,7 @@ impl ImportOptions {
             chunk_bytes: 2 << 20,
             batch_size: 2000,
             dry_run: false,
+            tokenizer: None,
             inputs,
         }
     }
@@ -158,6 +163,9 @@ pub struct ImportReport {
     pub rss_split: Option<(u64, u64)>,
     /// Source names no document uses after this import's updates and replacements.
     pub removed_sources: Vec<String>,
+    /// The tokenizer `tokens` was counted with, and whether this import set
+    /// it on the store.
+    pub tokenizer: Option<(String, bool)>,
 }
 
 impl ImportReport {
@@ -216,6 +224,15 @@ impl ImportReport {
         }
         if !self.removed_sources.is_empty() {
             s.push_str(&format!("Unused sources removed: {}\n", self.removed_sources.join(", ")));
+        }
+        if let Some((label, set)) = &self.tokenizer {
+            // A dry run never opens the store, so it cannot say whose tokenizer it is.
+            let how = match (self.dry_run, set) {
+                (true, _) => "",
+                (false, true) => ", now the store's tokenizer",
+                (false, false) => ", the store's tokenizer",
+            };
+            s.push_str(&format!("Tokens: counted with {label}{how}\n"));
         }
         match self.rss_split {
             Some((anon, file)) => s.push_str(&format!(
@@ -599,6 +616,7 @@ pub fn import(opts: &ImportOptions, log: &mut (dyn Write + Send)) -> Result<Impo
     }
     let workers = opts.workers.max(1);
     let started = Instant::now();
+    let given = opts.tokenizer.as_deref().map(|p| TokenizerSpec::from_path(p).map(|l| (p, l))).transpose()?;
 
     let store: Box<dyn Store> = if opts.dry_run {
         Box::new(store::NullStore::default())
@@ -622,6 +640,18 @@ pub fn import(opts: &ImportOptions, log: &mut (dyn Write + Send)) -> Result<Impo
         Ok(true)
     })?;
     let sources = Sources::load(store.as_ref())?;
+    let state = tokenizer::State::read(store.as_ref())?;
+    let tokenizer = tokenizer::for_import(&opts.db, &state, given, seen.len() as u64)?;
+    if let Some((loaded, true)) = &tokenizer {
+        // Set before the first document is written, so every stored count
+        // has its tokenizer on record even if the import stops early.
+        store.put_setting(tokenizer::CURRENT, Some(&loaded.spec.encode()))?;
+        store.persist()?;
+    }
+    if let Some((loaded, _)) = &tokenizer {
+        writeln!(log, "Counting tokens with {}", loaded.spec.label())?;
+    }
+    let shared_tokenizer = tokenizer.as_ref().map(|(l, _)| l.tokenizer.clone());
     let rejects_out = match &opts.rejects {
         Some(p) => Some(std::io::BufWriter::new(std::fs::File::create(p)?)),
         None => None,
@@ -663,8 +693,9 @@ pub fn import(opts: &ImportOptions, log: &mut (dyn Write + Send)) -> Result<Impo
             let rx: Receiver<(usize, Chunk)> = chunk_rx.clone();
             let tx = res_tx.clone();
             let cfg = &cfg;
+            let shared_tokenizer = shared_tokenizer.clone();
             s.spawn(move || {
-                let mut scratch = Scratch::default();
+                let mut scratch = Scratch { tokenizer: shared_tokenizer, ..Scratch::default() };
                 for (file, chunk) in rx.iter() {
                     let res = process_chunk(file, &chunk, cfg, &mut scratch);
                     if tx.send(res).is_err() {
@@ -722,6 +753,7 @@ pub fn import(opts: &ImportOptions, log: &mut (dyn Write + Send)) -> Result<Impo
         disk_size: store.disk_size()?,
         peak_rss: crate::util::peak_rss_bytes(),
         rss_split: crate::util::rss_breakdown(),
+        tokenizer: tokenizer.as_ref().map(|(l, set)| (l.spec.label(), *set)),
         ..Default::default()
     };
     for (i, path) in opts.inputs.iter().enumerate() {

@@ -289,6 +289,7 @@ mod tests {
             mean_word_len: None,
             stop_words: None,
             quality: Some(9_840),
+            tokens: None,
         }
     }
 

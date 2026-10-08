@@ -64,6 +64,8 @@ impl DropReason {
 /// Everything a worker reuses between documents.
 #[derive(Default)]
 pub struct Scratch {
+    /// The store's tokenizer; `tokens` is counted only when there is one.
+    pub tokenizer: Option<std::sync::Arc<tokie::Tokenizer>>,
     pub chars: chars::CharFreq,
     pub words: words::WordScratch,
     pub norm: Vec<u8>,
@@ -93,6 +95,8 @@ pub struct Features {
     pub quality: u16,
     /// Characters inside repeated 5-word windows, basis points.
     pub dup5gram: u16,
+    /// Tokens of the text; `None` without a tokenizer.
+    pub tokens: Option<u32>,
 }
 
 /// Basis points of `num / den`, rounded; 0 when `den` is 0.
@@ -135,8 +139,14 @@ impl Features {
             mean_word_len: Some(hundredths(self.word_chars, self.words)),
             stop_words: Some(basis_points(self.stop_words, self.words)),
             quality: Some(self.quality),
+            tokens: self.tokens,
         }
     }
+}
+
+/// Tokens of `text` with the scratch's tokenizer, if it has one.
+pub fn count_tokens(text: &str, scratch: &Scratch) -> Option<u32> {
+    scratch.tokenizer.as_deref().map(|t| crate::tokenizer::count(t, text))
 }
 
 /// Compute the features of `text`, or the prefilter reason to drop it.
@@ -183,6 +193,7 @@ pub fn compute(text: &str, max_len: u32, scratch: &mut Scratch) -> Result<Featur
         entropy: cs.entropy,
         quality: cs.quality,
         dup5gram,
+        tokens: count_tokens(text, scratch),
     })
 }
 

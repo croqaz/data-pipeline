@@ -375,6 +375,7 @@ mod tests {
             mean_word_len: None,
             stop_words: None,
             quality: Some(9_950),
+            tokens: None,
         };
         let key = [0xabu8; 16];
         let extra = br#"{"year": 1842, "title": "The \"Raven\"", "ok": true, "none": null, "tags": ["a", 1], "obj": {"k": 2}}"#;

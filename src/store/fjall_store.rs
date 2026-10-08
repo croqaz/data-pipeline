@@ -17,6 +17,7 @@ pub struct FjallStore {
     text: Keyspace,
     extra: Keyspace,
     sources: Keyspace,
+    settings: Keyspace,
 }
 
 /// Block and blob compression for new segments. `PIPELINE_FJALL_COMPRESSION=none`
@@ -45,7 +46,8 @@ impl FjallStore {
             .map_err(Error::store)?;
         let extra = db.keyspace("extra", KeyspaceCreateOptions::default).map_err(Error::store)?;
         let sources = db.keyspace("sources", KeyspaceCreateOptions::default).map_err(Error::store)?;
-        Ok(Self { db, meta, text, extra, sources })
+        let settings = db.keyspace("settings", KeyspaceCreateOptions::default).map_err(Error::store)?;
+        Ok(Self { db, meta, text, extra, sources, settings })
     }
 
     fn get(ks: &Keyspace, key: &Key) -> Result<Option<Vec<u8>>> {
@@ -168,7 +170,7 @@ impl Store for FjallStore {
     }
 
     fn compact(&self) -> Result<()> {
-        for ks in [&self.meta, &self.text, &self.extra, &self.sources] {
+        for ks in [&self.meta, &self.text, &self.extra, &self.sources, &self.settings] {
             ks.rotate_memtable_and_wait().map_err(Error::store)?;
             ks.major_compact().map_err(Error::store)?;
         }
@@ -212,10 +214,21 @@ impl Store for FjallStore {
         self.sources.remove(id.to_be_bytes().as_slice()).map_err(Error::store)
     }
 
+    fn setting(&self, name: &str) -> Result<Option<Vec<u8>>> {
+        Ok(self.settings.get(name.as_bytes()).map_err(Error::store)?.map(|v| v.to_vec()))
+    }
+
+    fn put_setting(&self, name: &str, value: Option<&[u8]>) -> Result<()> {
+        match value {
+            Some(v) => self.settings.insert(name.as_bytes(), v).map_err(Error::store),
+            None => self.settings.remove(name.as_bytes()).map_err(Error::store),
+        }
+    }
+
     /// Flush memtables to segments and sync the journal, so later scans read
     /// sorted blocks instead of the skip list.
     fn persist(&self) -> Result<()> {
-        for ks in [&self.meta, &self.text, &self.extra, &self.sources] {
+        for ks in [&self.meta, &self.text, &self.extra, &self.sources, &self.settings] {
             ks.rotate_memtable_and_wait().map_err(Error::store)?;
         }
         self.db.persist(PersistMode::SyncAll).map_err(Error::store)

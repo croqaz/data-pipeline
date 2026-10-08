@@ -71,6 +71,10 @@ pub struct Meta {
     /// 0.75, clamped to 0..=125. Prose reads about 100.
     #[n(17)]
     pub quality: Option<u16>,
+    /// Tokens of the text, counted with the store's tokenizer (see
+    /// `src/tokenizer.rs`); `None` in a store without one.
+    #[n(18)]
+    pub tokens: Option<u32>,
 }
 
 impl Meta {
@@ -159,6 +163,7 @@ macro_rules! pct_feature {
 pub const FEATURES: &[FeatureDef] = &[
     int_feature!("len", len),
     int_feature!("bytes", bytes),
+    opt_int_feature!("tokens", tokens),
     int_feature!("uniqChars", uniq_chars),
     int_feature!("words", words),
     int_feature!("uniqWords", uniq_words),
@@ -206,6 +211,7 @@ mod tests {
             mean_word_len: None,
             stop_words: None,
             quality: Some(10_150),
+            tokens: None,
         }
     }
 
@@ -272,7 +278,8 @@ mod tests {
 
     #[test]
     fn registry_lookup_and_presentation() {
-        assert_eq!(feature_index("words"), Some(3));
+        assert_eq!(feature_index("words"), Some(4));
+        assert_eq!(feature_index("tokens"), Some(2));
         assert_eq!(feature_index("nope"), None);
         assert!(feature_names().contains(&"uniqWords"));
         let m = sample();

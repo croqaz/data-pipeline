@@ -9,7 +9,8 @@ is inside.
 ```sh
 pipeline import --db DIR [-s LABEL] [--source-key KEY] [-k TEXT_KEY] [-e key1,key2]
                 [--max-len N] [-w N] [--offset N] [--limit N] [--chunk-mb N] [--batch-size N]
-                [--rejects FILE] [--on-error skip|abort] [--nocow] [--dry-run] FILES...
+                [--rejects FILE] [--on-error skip|abort] [--nocow] [--dry-run]
+                [--tokenizer DIR] FILES...
 pipeline stats  --db DIR [EXPR] [--limit N] [-t N]
 pipeline count  --db DIR [EXPR] [-t N]
 pipeline query  --db DIR [EXPR] [-l N] [--sort FEATURE [--asc] | --random [--seed S]]
@@ -25,7 +26,7 @@ pipeline compact --db DIR
 pipeline delete --db DIR (EXPR | --id ID...) [--dry-run] [--limit N] [-y]
                 [--backup FILE] [--force] [-t N]
 pipeline explore --db DIR [-p PORT] [--bind ADDR] [-t N]
-pipeline recompute --db DIR [--dry-run | --force] [-t N] [--batch-size N]
+pipeline recompute --db DIR [--dry-run | --force] [-t N] [--batch-size N] [--tokenizer DIR]
 ```
 
 `import` reads `.jsonl`, `.jsonl.gz` and `.jsonl.zst`. Every line must be
@@ -62,7 +63,7 @@ The bake-off numbers here and in `BENCHMARKS.md` were measured by earlier
 builds with a different feature set: they computed `compress` (an LZ4
 ratio), `top4gram` (the most frequent 4-word phrase) and `dup10gram`
 (repeated 10-word sequences), which are gone, and none of them had
-`dictHit`, `quality` or `lines`. The first runs computed fewer features
+`dictHit`, `quality`, `lines` or `tokens`. The first runs computed fewer features
 still. The numbers are kept as they were measured.
 `--dry-run` parses and counts everything without opening a store, which
 is the quickest way to validate a new dataset or to measure the CPU side
@@ -80,13 +81,13 @@ a btrfs volume that compresses by itself.
 ## Looking inside
 
 `info` reads no record: backend, approximate count, disk size, source
-labels, the feature list and schema, then per-keyspace facts from the
+labels, the feature list and schema, the store's tokenizer, then per-keyspace facts from the
 engine (table and blob file counts, files at level 0, cache size).
 
 `stats` scans the documents matching EXPR (all of them without one) and
 prints the count per source, a table of every feature (present, mean, min,
-P5, P50, P95, max), then the totals of `len`, `bytes`, `words`, `lines`
-and `sentences`.
+P5, P50, P95, max), then the totals of `len`, `bytes`, `tokens`, `words`,
+`lines` and `sentences`.
 
 `show` prints a document: id, source, every feature, the stored metadata,
 then the text after a rule. An id is 32 hex characters, or an even-length
@@ -133,7 +134,8 @@ to decode, texts and metadata missing or present without a meta
 source ids without a label. `--deep` also reads every text and checks that
 it is UTF-8, that its BLAKE3 key matches, and that the stored features
 equal a fresh computation, so a changed scanner shows up as "stale
-features". Any problem makes the command exit 1 after printing the
+features" (`tokens` is recounted with the store's tokenizer). A tokenizer
+switch that did not finish is a problem too. Any problem makes the command exit 1 after printing the
 counts and example ids. Run it after an interrupted import, after a
 delete, or before cutting a training set. Its one write: after a pass
 with no corrupt meta, it removes source names that no document uses.
@@ -150,6 +152,7 @@ store serves point reads about 15x slower until then.
 | name | what it is |
 |---|---|
 | `len`, `bytes` | characters (Unicode scalars) and UTF-8 bytes |
+| `tokens` | tokens of the text with the store's tokenizer (see Tokens below); `null` in a store without one |
 | `uniqChars` | distinct characters |
 | `words`, `uniqWords` | whitespace-separated tokens after stripping punctuation; distinct ones after lowercasing |
 | `meanWordLen` | mean characters per word, two decimals: English prose reads about 4.6 to 4.7 at the median. Words split on whitespace only, so "potter—Andrew" is one long word: lists joined by dashes read above 7, number tables below 3.5 |
@@ -162,6 +165,38 @@ store serves point reads about 15x slower until then.
 | `dup5gram` | percent of the words inside a 5-word sequence that occurs more than once in the document (words folded like `uniqWords`). Most documents read 0 and 95% read under about 10. 5 to 15 is normal: a heading or a title repeated in the body. 15 to 40 is verse refrains, market reports and proclamations with set formulas; 40 to 70 is rules, charters and advertisements built from one repeated phrase; above 70 the document is mostly the same text more than once. Short texts reach high values from a single repeated phrase. |
 | `entropy` | order-0 Shannon entropy of the characters as a percent of 4.47 bits per character; 4.47 bits is typical of English prose, which reads about 99.5 at the median; OCR noise reads higher |
 | `quality` | how much of the text is letters, as opposed to digits, punctuation, symbols, tabs or other scripts; higher is better. Prose reads 100 to 106; 80 to 95 is prose broken up by numbers and headings (market reports, notices); under 80 is tables, subscription lists and contents pages with dot leaders. Text made only of letters would read 125, and a page of symbols 0 |
+
+### Tokens
+
+`tokens` is optional. `import --tokenizer DIR` counts each document's
+tokens with the `tokenizer.json` in DIR, a Hugging Face tokenizer read with
+tokie, without adding BOS, EOS or other template tokens. The first import
+into a new store makes it the store's tokenizer: one store-wide setting
+keeps the folder name (`t-v5` for `tokenizers/t-v5/`), the BLAKE3 of the
+file and the file itself, so the store no longer needs DIR. `info` shows
+it, and the `stats` total is in its tokens.
+
+Every document in a store is counted with the same tokenizer:
+
+- Later imports count with the store's copy, so `--tokenizer` can be left
+  out. A different tokenizer is refused with an error naming both.
+- A store that already holds documents without counts refuses
+  `import --tokenizer`: `recompute --tokenizer DIR` counts them first.
+- `recompute --tokenizer DIR` switches the store to another tokenizer.
+  Every document is recounted, including the ones today's prefilter would
+  reject, and only then does the new tokenizer replace the old one. If the
+  switch stops halfway, the store records it: `import` refuses to run,
+  `check` and `stats` report the mixed counts, and a plain `recompute`
+  finishes the switch (`recompute --tokenizer OLD` goes back instead).
+
+Counting with a 32k-token BPE tokenizer slows an import of 521 MB from
+about 290 MB/s to 256 MB/s on 16 threads.
+
+```sh
+pipeline import --db /data/corpus --tokenizer tokenizers/t-v5 books.jsonl
+pipeline import --db /data/corpus more.jsonl  # counted with t-v5
+pipeline recompute --db /data/corpus --tokenizer tokenizers/t-v6
+```
 
 ### Recomputing features
 
@@ -227,6 +262,7 @@ turns a comparison into 1 or 0, so conditions can be counted.
 | `len / lines` | mean characters per line, the same signal in characters |
 | `len / uniqChars` | characters per distinct character. Low for short or symbol-heavy text, where many characters appear once |
 | `bytes / len` | 1 for pure ASCII; above 1 when the text has accented letters, typographic quotes or other scripts |
+| `bytes / tokens` | bytes per token: how well the tokenizer fits the text. With a 32k-token BPE tokenizer, clean prose reads about 4.5; under 3 is OCR column fragments, all-caps advertisements and garbled text, which split into many short tokens |
 | `100 - alpha` | percent of words that are not purely alphabetic: numbers, prices, dates, codes. High in tables, accounts and price lists |
 | `100 - dictHit` | percent of alphabetic words outside the vocabulary: OCR errors, rare or archaic words, other languages |
 | `entropy > 105` | many capital letters or symbols: headlines, notices, OCR noise |
@@ -390,7 +426,9 @@ route over a real socket; the handlers themselves are tested without one.
 `tests/reference.py` is an independent Python implementation of the
 features; `tests/golden.rs` checks the Rust scanners against its output.
 Regenerate the fixture with `python3 tests/reference.py` after changing a
-definition in both places.
+definition in both places. `tests/make_tokenizers.py` made the two tiny
+tokenizers in `tests/fixtures/tok-a` and `tok-b` that the token tests count
+with; the expected counts come from Hugging Face `tokenizers`.
 
 ## Layout
 
@@ -413,6 +451,7 @@ src/check.rs       three-keyspace merge audit, optional deep re-hash
 src/info.rs        info and compact
 src/show.rs        id resolution and the readable document layout
 src/delete.rs      selection, backup, batched deletes
-src/recompute.rs   re-read every text, rewrite the features that changed
+src/recompute.rs   re-read every text, rewrite the features that changed, switch the tokenizer
+src/tokenizer.rs   the store's tokenizer: loading, counting, the import and switch rules
 src/explore/       the read-only browser: handlers, the tiny_http layer, index.html
 ```
